@@ -246,7 +246,7 @@ function App() {
             </div>
 
             <div className="panel">
-              <h3>💬 Clinical Context</h3>
+              <h3>💬 Clinical Context/Phenotype</h3>
               <input type="text" className="input" placeholder="Disease" value={disease} onChange={e => setDisease(e.target.value)} />
               <input type="number" className="input" value={maxLitVariants} onChange={e => setMaxLitVariants(e.target.value)} />
             </div>
