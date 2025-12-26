@@ -309,17 +309,17 @@ async def run_analysis_task(job_id: str, file_path: str, ext: str, prompt: str, 
         jobs_db[job_id] = {
             "status": "completed",
             "results": {
-                "input_variants": original_df_len, "filtered_variants": len(filtered), "disease": disease,
-                "results": {
-                    "summary": analysis.get("summary", "Analysis complete"), "variant_count": len(filtered),
-                    "variants": cleaned_variants, "wilms": wilms_result,
-                }
+                "input_variants": original_df_len,
+                "filtered_variants": len(filtered),
+                "summary": analysis.get("summary", "Analysis complete"),
+                "variants": cleaned_variants,
+                "wilms": wilms_result,
             }
         }
         await manager.broadcast(f"Job {job_id}: Analysis complete!")
     except Exception as e:
         logger.exception(f"Job {job_id} failed")
-        jobs_db[job_id] = {"status": "error", "error": str(e)}
+        jobs_db[job_id] = {"status": "failed", "error": str(e)}
         await manager.broadcast(f"Job {job_id}: Error - {str(e)}")
 
 @app.post("/analyze")
@@ -343,9 +343,11 @@ async def analyze(
         background_tasks.add_task(
             run_analysis_task, job_id, tmp.name, ext, prompt, disease, int(max_lit_variants), 0
         )
+        await manager.broadcast(f"Job {job_id}: Queued successfully")
         return {"job_id": job_id, "status": "queued"}
     except Exception as e:
         jobs_db[job_id] = {"status": "error", "error": str(e)}
+        await manager.broadcast(f"Job {job_id}: Submission error - {str(e)}")
         return {"job_id": job_id, "status": "error", "error": str(e)}
 
 @app.get("/results/{job_id}")

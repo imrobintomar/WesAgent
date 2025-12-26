@@ -165,21 +165,34 @@ function App() {
       const poll = async () => {
         try {
           const res = await fetch(`${baseUrl}/results/${job_id}`);
-          if (!res.ok) return;
+          if (!res.ok) {
+            console.error("Polling response not OK:", res.status);
+            setTimeout(poll, 2000);
+            return;
+          }
+
+          const contentType = res.headers.get("content-type");
+          if (!contentType || !contentType.includes("application/json")) {
+            const text = await res.text();
+            console.error("Expected JSON but received:", text.slice(0, 100));
+            setTimeout(poll, 2000);
+            return;
+          }
+
           const jobData = await res.json();
 
           if (jobData.status === "completed") {
             const data = jobData.results;
-            setAnalysis(data?.results?.summary || "");
-            setVariants(data?.results?.variants || []);
+            setAnalysis(data?.summary || "");
+            setVariants(data?.variants || []);
             setWorkflowSteps([
               `Input: ${data?.input_variants}`,
               `Filtered: ${data?.filtered_variants}`,
             ]);
             setHasResults(true);
             setLoading(false);
-          } else if (jobData.status === "error") {
-            setError(jobData.error);
+          } else if (jobData.status === "error" || jobData.status === "failed") {
+            setError(jobData.error || "Analysis failed");
             setLoading(false);
           } else {
             setTimeout(poll, 2000);
