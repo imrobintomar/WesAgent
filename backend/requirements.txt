@@ -1,0 +1,37 @@
+# -----------------------------
+# Core Web Framework
+# -----------------------------
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic==2.4.2
+python-dotenv==1.0.0
+aiofiles==23.2.1
+
+# -----------------------------
+# LangChain + Gemini (STABLE)
+# -----------------------------
+langchain==0.1.20
+langchain-core==0.1.52
+langchain-google-genai==0.0.11
+
+# -----------------------------
+# Google Gemini SDK
+# -----------------------------
+google-generativeai==0.4.1
+google-api-core==2.17.1
+
+# -----------------------------
+# Bioinformatics
+# -----------------------------
+pandas>=2.1
+numpy>=1.26
+pysam>=0.22
+cyvcf2>=0.30
+
+# -----------------------------
+# Development
+# -----------------------------
+pytest==7.4.3
+pytest-asyncio==0.21.1
+black==23.10.0
+pylint==3.0.2
