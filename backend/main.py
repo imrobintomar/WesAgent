@@ -16,6 +16,8 @@ import pysam
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+from services.franklin_client import parse_variant, classify_variant as franklin_classify
+from services.varsome_client import classify_variant as varsome_classify
 
 from variant_agents import (
     filter_variants,

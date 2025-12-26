@@ -81,10 +81,18 @@ function App() {
     }
 
     try {
-      // Determine WebSocket URL based on current location
-      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const host = window.location.host; // Use same host as frontend
-      const wsUrl = `${protocol}//${host}/ws/progress`;
+      // Use ngrok URL for API if provided, otherwise fallback to same host
+      const apiBase = import.meta.env.VITE_API_BASE_URL || "";
+      let wsUrl;
+
+      if (apiBase.startsWith("http")) {
+        // Convert https://... to wss://... or http://... to ws://...
+        wsUrl = apiBase.replace(/^http/, "ws") + "/ws/progress";
+      } else {
+        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+        const host = window.location.host;
+        wsUrl = `${protocol}//${host}/ws/progress`;
+      }
 
       console.log(`Attempting WebSocket connection to: ${wsUrl}`);
 
@@ -138,9 +146,7 @@ function App() {
 
   // Get API base URL dynamically
   const getApiBase = () => {
-    // In development with Vite proxy, use relative URLs
-    // In production, use window.location.origin
-    return window.location.origin;
+    return import.meta.env.VITE_API_BASE_URL || window.location.origin;
   };
 
   const API_BASE = getApiBase();
