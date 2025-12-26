@@ -149,7 +149,7 @@ manager = ConnectionManager()
 
 
 # -------------------------------------------------
-# CORS Preflight Handler
+# CORS Preflight Handler & Error Handler
 # -------------------------------------------------
 @app.options("/{full_path:path}")
 async def preflight_handler(full_path: str):
@@ -158,6 +158,37 @@ async def preflight_handler(full_path: str):
     This is critical for browser-based file uploads.
     """
     return JSONResponse(status_code=200)
+
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request, exc):
+    """
+    Global exception handler that includes CORS headers.
+    Ensures 503 and other errors still have CORS headers.
+    """
+    logger.error(f"Unhandled exception: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"error": str(exc)},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+        }
+    )
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request, exc):
+    """
+    HTTP exception handler that includes CORS headers.
+    """
+    logger.error(f"HTTP exception {exc.status_code}: {exc.detail}")
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": exc.detail},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+        }
+    )
 
 
 # -------------------------------------------------
@@ -626,6 +657,9 @@ async def analyze(
         prompt: Clinical/analysis prompt
         disease: Disease context (default: "Unknown")
         max_lit_variants: Max variants for literature analysis (default: 300)
+    
+    NOTE: Large files (>100MB) may take several minutes to process.
+    Timeouts are set to 15 minutes for analysis completion.
     """
     
     logger.info(f"🔬 Analysis request: {file.filename} | Disease: {disease}")
@@ -653,10 +687,13 @@ async def analyze(
             tmp.write(content)
             file_path = tmp.name
         
-        logger.info(f"📁 File saved: {file_path}")
-        await manager.broadcast(f"File saved ({len(content)} bytes)")
+        file_size_mb = len(content) / (1024 * 1024)
+        logger.info(f"📁 File saved: {file_path} ({file_size_mb:.2f} MB)")
+        await manager.broadcast(f"File received ({file_size_mb:.2f} MB) - processing may take several minutes")
         
         # Parse file
+        logger.info("📖 Parsing file...")
+        await manager.broadcast("Parsing file...")
         if ext in (".vcf", ".vcf.gz"):
             df = await parse_vcf(file_path)
         else:
@@ -702,7 +739,7 @@ async def analyze(
         
         # Core variant analysis
         logger.info(f"🧬 Starting variant analysis (disease={disease})...")
-        await manager.broadcast(f"Analyzing variants for {disease}...")
+        await manager.broadcast(f"Analyzing {len(filtered)} variants for {disease}... (this may take a few minutes)")
         try:
             analysis = analyze_variants(
                 filtered, prompt, disease=disease, max_lit_variants=max_lit_variants_int
@@ -734,6 +771,7 @@ async def analyze(
         
         # Clean output
         logger.info("📋 Formatting output...")
+        await manager.broadcast("Formatting results...")
         cleaned_variants = clean_variants_for_output(filtered)
         
         # Return response
@@ -788,10 +826,12 @@ if __name__ == "__main__":
         app,
         host="0.0.0.0",
         port=8000,
-        # CRITICAL: Timeouts for large file handling
-        timeout_keep_alive=300,        # 5 minutes for keep-alive
-        timeout_graceful_shutdown=60,  # 1 minute graceful shutdown
+        # CRITICAL: Timeouts for large file handling (in seconds)
+        timeout_keep_alive=900,        # 15 minutes for keep-alive connections
+        timeout_graceful_shutdown=120,  # 2 minutes graceful shutdown
         # Logging
         access_log=True,
         log_level="info",
+        # Increase worker timeout for Gunicorn (if applicable)
+        # workers=1,  # Single worker for WebSocket
     )

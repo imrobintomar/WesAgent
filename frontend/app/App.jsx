@@ -12,6 +12,42 @@ import {
 import VariantTable from "./components/VariantTable";
 import VariantVisuals from "./components/VariantVisuals";
 import "./App.css";
+
+/* =========================
+   API CONFIGURATION
+ ========================= */
+
+// Get API base URL from environment or use fallback
+const getApiUrl = () => {
+  // Priority: explicit env var > window location fallback
+  const envUrl = import.meta.env.VITE_API_BASE_URL;
+  
+  if (envUrl) {
+    console.log("✅ Using API URL from VITE_API_BASE_URL:", envUrl);
+    return envUrl;
+  }
+  
+  // Fallback: use window location
+  console.warn(
+    "⚠️ VITE_API_BASE_URL not set. Using window location.",
+    "Set VITE_API_BASE_URL in .env for explicit API endpoint."
+  );
+  
+  return window.location.origin;
+};
+
+const API_BASE = getApiUrl();
+
+// Validate API URL
+if (!API_BASE || API_BASE === "http://localhost:5173") {
+  console.error(
+    "❌ API_BASE is misconfigured!",
+    "You must set VITE_API_BASE_URL in .env.local or .env.production"
+  );
+}
+
+console.log("📍 API Base URL:", API_BASE);
+
 /* =========================
    SAFE FIELD HELPERS
  ========================= */
@@ -19,6 +55,7 @@ import "./App.css";
 function getGene(v) {
   return (
     v?.["Gene.refGeneWithVer"] ||
+    v?.["Gene.refGene"] ||
     v?.gene ||
     ""
   );
@@ -44,7 +81,6 @@ function App() {
   const [variants, setVariants] = useState([]);
   const [analysis, setAnalysis] = useState("");
   const [workflowSteps, setWorkflowSteps] = useState([]);
-  const [downloadCsv, setDownloadCsv] = useState(null);
 
   // Filters
   const [afFilter, setAfFilter] = useState(0.01);
@@ -54,7 +90,7 @@ function App() {
     "Identify all cancer-related variants and their therapeutic implications."
   );
 
-  const [disease, setDisease] = useState("Unknown");
+  const [disease, setDisease] = useState("cancer");
   const [maxLitVariants, setMaxLitVariants] = useState(300);
 
   const [loading, setLoading] = useState(false);
@@ -67,57 +103,60 @@ function App() {
   const [showProgressPopup, setShowProgressPopup] = useState(false);
   const ws = useRef(null);
 
+  // Cleanup WebSocket on unmount
   useEffect(() => {
     return () => {
-      if (ws.current) {
+      if (ws.current && ws.current.readyState === WebSocket.OPEN) {
         ws.current.close();
       }
     };
   }, []);
 
+  /* =========================
+     WEBSOCKET CONNECTION
+  ========================= */
+
   const connectWebSocket = () => {
-    if (ws.current) {
+    // Close existing connection
+    if (ws.current && ws.current.readyState === WebSocket.OPEN) {
       ws.current.close();
     }
 
     try {
-      // Use absolute URL from env if available, otherwise relative for proxy
-      const apiBase = import.meta.env.VITE_API_BASE_URL;
-      let wsUrl;
+      // Convert HTTP URL to WebSocket URL
+      let wsUrl = API_BASE.replace(/^http:/, "ws:").replace(/^https:/, "wss:");
+      wsUrl = wsUrl.replace(/\/$/, "") + "/ws/progress"; // Remove trailing slash and add endpoint
 
-      if (apiBase && apiBase.startsWith("http")) {
-        // Absolute URL for production/ngrok
-        wsUrl = apiBase.replace(/^http/, "ws") + "/ws/progress";
-      } else {
-        // Relative URL for dev proxy
-        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-        const host = window.location.host;
-        wsUrl = `${protocol}//${host}/ws/progress`;
-      }
-
-      console.log(`Attempting WebSocket connection to: ${wsUrl}`);
+      console.log("🔌 Attempting WebSocket connection to:", wsUrl);
 
       ws.current = new WebSocket(wsUrl);
 
-      ws.current.onmessage = (event) => {
-        console.log("WebSocket message received:", event.data);
-        setProgressMessages((prev) => [...prev, event.data].slice(-10));
+      ws.current.onopen = () => {
+        console.log("✅ WebSocket Connected");
+        setProgressMessages(["✅ Connected to analysis server..."]);
         setShowProgressPopup(true);
       };
 
-      ws.current.onopen = () => {
-        console.log("✅ WebSocket Connected");
-        setProgressMessages(["Connected to analysis server..."]);
+      ws.current.onmessage = (event) => {
+        console.log("📨 WebSocket message:", event.data);
+        setProgressMessages((prev) => {
+          const updated = [...prev, event.data];
+          // Keep last 20 messages
+          return updated.slice(-20);
+        });
         setShowProgressPopup(true);
       };
 
       ws.current.onerror = (event) => {
         console.error("❌ WebSocket Error:", event);
-        setProgressMessages((prev) => [...prev, "⚠️ Connection issue (analysis may continue in background)"]);
+        setProgressMessages((prev) => [
+          ...prev,
+          "⚠️ Connection issue (analysis may continue in background)",
+        ]);
       };
 
       ws.current.onclose = () => {
-        console.log("WebSocket Disconnected");
+        console.log("🔌 WebSocket Disconnected");
       };
     } catch (err) {
       console.error("Failed to create WebSocket:", err);
@@ -138,22 +177,12 @@ function App() {
       const gene = getGene(v).toLowerCase();
       const af = getAF(v);
 
-      const matchesGene = gene.includes(q);
+      const matchesGene = q === "" || gene.includes(q);
       const matchesAF = af <= afFilter;
 
       return matchesGene && matchesAF;
     });
   }, [variants, geneSearch, afFilter]);
-
-  // Get API base URL dynamically
-  const getApiBase = () => {
-    // If VITE_API_BASE_URL is set (absolute URL), use it.
-    // Otherwise, use empty string to allow Vite proxy to work in dev,
-    // or fallback to origin if needed.
-    return import.meta.env.VITE_API_BASE_URL || "";
-  };
-
-  const API_BASE = getApiBase();
 
   /* =========================
      FILE UPLOAD
@@ -165,7 +194,7 @@ function App() {
 
     const validExtensions = [".vcf", ".vcf.gz", ".txt", ".tsv", ".csv"];
     const fileName = file.name.toLowerCase();
-    const isValid = validExtensions.some(ext => fileName.endsWith(ext));
+    const isValid = validExtensions.some((ext) => fileName.endsWith(ext));
 
     if (!isValid) {
       setError(`Please upload a supported file: ${validExtensions.join(", ")}`);
@@ -196,7 +225,6 @@ function App() {
     setVariants([]);
     setAnalysis("");
     setWorkflowSteps([]);
-    setDownloadCsv(null);
     setError("");
     setProgressMessages([]);
 
@@ -205,60 +233,88 @@ function App() {
 
     // Create FormData object
     const formData = new FormData();
-    
+
     console.log("🔧 Building FormData...");
     console.log(`  vcfFile: ${vcfFile.name} (${vcfFile.type}, ${vcfFile.size} bytes)`);
     console.log(`  prompt: ${userPrompt.substring(0, 50)}...`);
     console.log(`  disease: ${disease || "Unknown"}`);
     console.log(`  max_lit_variants: ${maxLitVariants || 300}`);
-    
+
     formData.append("file", vcfFile, vcfFile.name);
     formData.append("prompt", userPrompt);
     formData.append("disease", disease || "Unknown");
     formData.append("max_lit_variants", String(maxLitVariants || 300));
 
-    // Verify FormData contents
-    console.log("FormData built. Sending to:", `${API_BASE}/analyze`);
+    const analyzeUrl = `${API_BASE.replace(/\/$/, "")}/analyze`;
+    console.log("🚀 Sending to:", analyzeUrl);
 
     try {
       setUploadProgress(0);
 
-      const response = await fetch(`${API_BASE}/analyze`, {
+      const response = await fetch(analyzeUrl, {
         method: "POST",
         body: formData,
-        // Let browser set Content-Type with boundary automatically
+        credentials: "include", // Include cookies if needed for CORS
+        // DO NOT set Content-Type header - let browser set it with boundary
+        headers: {
+          // Don't include Content-Type, browser will set it
+          "Accept": "application/json",
+        },
       });
 
-      console.log(`Response status: ${response.status} ${response.statusText}`);
+      console.log(
+        `📡 Response status: ${response.status} ${response.statusText}`
+      );
 
-      // Close WS after some delay
+      // Close WebSocket after delay
       setTimeout(() => {
-        if (ws.current) {
+        if (ws.current && ws.current.readyState === WebSocket.OPEN) {
           ws.current.close();
         }
       }, 2000);
 
       if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        console.error(" Server error:", errorData);
-        
-        // Extract error message
-        let errorMsg = response.statusText;
-        if (errorData.detail) {
-          if (Array.isArray(errorData.detail)) {
-            errorMsg = errorData.detail.map(e => `${e.loc?.join('.')} - ${e.msg}`).join(", ");
-          } else {
-            errorMsg = errorData.detail;
+        let errorMsg = `HTTP ${response.status}: ${response.statusText}`;
+
+        try {
+          const errorData = await response.json();
+          console.error("❌ Server error response:", errorData);
+
+          if (errorData.detail) {
+            if (Array.isArray(errorData.detail)) {
+              errorMsg = errorData.detail
+                .map((e) => `${e.loc?.join(".")} - ${e.msg}`)
+                .join(", ");
+            } else {
+              errorMsg = errorData.detail;
+            }
+          } else if (errorData.error) {
+            errorMsg = errorData.error;
           }
+        } catch (parseErr) {
+          console.warn("Could not parse error response:", parseErr);
         }
-        
-        setError(`Error ${response.status}: ${errorMsg}`);
+
+        setError(errorMsg);
         setLoading(false);
+
+        // Log detailed error info for debugging CORS issues
+        if (response.status === 503 || response.status === 0) {
+          console.error(
+            "⚠️ CORS or connectivity issue detected.",
+            "Make sure VITE_API_BASE_URL is correct."
+          );
+          setError(
+            errorMsg +
+              "\n\nCORS/Connection Issue: Check that VITE_API_BASE_URL is set correctly."
+          );
+        }
+
         return;
       }
 
       const data = await response.json();
-      console.log(" Analysis complete! Response:", data);
+      console.log("✅ Analysis complete! Response:", data);
 
       setAnalysis(data?.results?.summary || "No summary returned.");
 
@@ -267,25 +323,80 @@ function App() {
         : [];
 
       setVariants(variantsData);
-      console.log(` Loaded ${variantsData.length} variants`);
+      console.log(`📊 Loaded ${variantsData.length} variants`);
 
       setWorkflowSteps([
         `Input variants: ${data?.input_variants ?? "NA"}`,
         `Filtered variants: ${data?.filtered_variants ?? "NA"}`,
         `Prioritized for literature: ${data?.results?.prioritized_count ?? "NA"}`,
         `Literature evidence: ${data?.results?.literature_evidence_count ?? "NA"}`,
-        
       ]);
 
       setHasResults(true);
-      setProgressMessages((prev) => [...prev, "Analysis complete!"]);
+      setProgressMessages((prev) => [...prev, "✅ Analysis complete!"]);
     } catch (err) {
-      console.error(" Network/parsing error:", err);
-      setError(`Error: ${err.message}`);
+      console.error("❌ Network/parsing error:", err);
+
+      // Detailed error message for debugging
+      let errorMsg = `Error: ${err.message}`;
+
+      if (err.message.includes("Failed to fetch")) {
+        errorMsg +=
+          "\n\nPossible CORS issue or API endpoint unreachable.\nCheck:\n" +
+          "1. VITE_API_BASE_URL is set correctly\n" +
+          "2. Backend is running\n" +
+          "3. No firewall/network blocking";
+      }
+
+      setError(errorMsg);
     } finally {
       setLoading(false);
       setUploadProgress(0);
     }
+  };
+
+  /* =========================
+     EXPORT CSV
+  ========================= */
+
+  const exportToCSV = () => {
+    if (filteredVariants.length === 0) {
+      setError("No variants to export");
+      return;
+    }
+
+    // Get all unique keys from variants
+    const allKeys = new Set();
+    filteredVariants.forEach((v) => {
+      Object.keys(v).forEach((k) => allKeys.add(k));
+    });
+
+    const headers = Array.from(allKeys);
+    const csvContent = [
+      headers.join(","),
+      ...filteredVariants.map((v) =>
+        headers.map((h) => {
+          const val = v[h];
+          // Escape quotes and wrap in quotes if contains comma
+          if (val === null || val === undefined) return "";
+          const str = String(val);
+          if (str.includes(",") || str.includes('"')) {
+            return `"${str.replace(/"/g, '""')}"`;
+          }
+          return str;
+        })
+      ),
+    ].join("\n");
+
+    const blob = new Blob([csvContent], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `variants-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
   /* =========================
@@ -336,7 +447,7 @@ function App() {
                       style={{ width: `${uploadProgress}%` }}
                     />
                   </div>
-                  <small>Uploading… {uploadProgress}%</small>
+                  <small>Processing… {uploadProgress}%</small>
                 </div>
               )}
             </div>
@@ -363,7 +474,9 @@ function App() {
                   min="5"
                   max="1000"
                   value={maxLitVariants}
-                  onChange={(e) => setMaxLitVariants(Math.max(50, parseInt(e.target.value) || 300))}
+                  onChange={(e) =>
+                    setMaxLitVariants(Math.max(50, parseInt(e.target.value) || 300))
+                  }
                 />
                 <small>Higher = slower but more thorough</small>
               </div>
@@ -385,7 +498,7 @@ function App() {
               >
                 {loading ? (
                   <>
-                    <Loader size={18} className="spin" /> Analyzing Please Wait...
+                    <Loader size={18} className="spin" /> Analyzing...
                   </>
                 ) : (
                   <>
@@ -424,6 +537,14 @@ function App() {
                     style={{ width: "100%" }}
                   />
                 </div>
+
+                <button
+                  className="btn btn-small"
+                  onClick={exportToCSV}
+                  style={{ marginTop: "10px", width: "100%" }}
+                >
+                  <Download size={16} /> Download CSV
+                </button>
               </div>
             )}
           </aside>
@@ -432,13 +553,14 @@ function App() {
           <section className="content">
             {error && (
               <div className="alert alert-error">
-                <AlertCircle size={20} /> {error}
+                <AlertCircle size={20} />
+                <div style={{ marginLeft: "10px", whiteSpace: "pre-wrap" }}>
+                  {error}
+                </div>
               </div>
             )}
 
-            {hasResults && (
-              <VariantVisuals variants={filteredVariants} />
-            )}
+            {hasResults && <VariantVisuals variants={filteredVariants} />}
 
             {workflowSteps.length > 0 && (
               <div className="panel">
@@ -454,12 +576,6 @@ function App() {
             <div className="panel results-panel">
               <div className="results-header">
                 <h3>📊 Analysis Results</h3>
-
-                {hasResults && downloadCsv && (
-                  <a href={downloadCsv} className="btn-small">
-                    <Download size={16} /> Download Full CSV
-                  </a>
-                )}
               </div>
 
               {hasResults ? (
@@ -471,9 +587,7 @@ function App() {
                   />
                 </>
               ) : (
-                <p className="empty-text">
-                  Upload a VCF file to begin analysis
-                </p>
+                <p className="empty-text">Upload a VCF file to begin analysis</p>
               )}
             </div>
           </section>
@@ -484,8 +598,11 @@ function App() {
       {showProgressPopup && (
         <div className="progress-popup">
           <div className="progress-popup-header">
-            <h4>🔴 Live Agent Progress</h4>
-            <button onClick={() => setShowProgressPopup(false)} className="close-btn">
+            <h4>🔴 Live Analysis Progress</h4>
+            <button
+              onClick={() => setShowProgressPopup(false)}
+              className="close-btn"
+            >
               <X size={16} />
             </button>
           </div>
@@ -506,7 +623,7 @@ function App() {
       )}
 
       <footer className="footer">
-        <p>For Research Purpose only | Contact Us </p>
+        <p>For Research Purpose only | Contact Us</p>
       </footer>
     </div>
   );
