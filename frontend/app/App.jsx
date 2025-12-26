@@ -101,11 +101,11 @@ function App() {
         wsUrl = `${protocol}//${window.location.host}/ws/progress`;
       }
 
-      console.log("🔌 Connecting WebSocket:", wsUrl);
+      console.log("Connecting WebSocket:", wsUrl);
       ws.current = new WebSocket(wsUrl);
 
       ws.current.onopen = () => {
-        setProgressMessages(["✅ Connected to server..."]);
+        setProgressMessages(["Connected to server..."]);
         setShowProgressPopup(true);
       };
 
@@ -116,7 +116,7 @@ function App() {
 
       ws.current.onerror = (err) => {
         console.warn("WebSocket Error:", err);
-        setProgressMessages((prev) => [...prev, "⚠️ Connection issues. Falling back to polling..."].slice(-20));
+        setProgressMessages((prev) => [...prev, " Connection issues. Falling back to polling..."].slice(-20));
       };
     } catch (err) {
       console.error("WS Error:", err);
@@ -230,7 +230,7 @@ function App() {
     <div className="app">
       <header className="header">
         <h1>🧬 WES Analysis Agent</h1>
-        <p>Research-grade interpretation | AIIMS New Delhi</p>
+        <p>Research-grade interpretation </p>
       </header>
 
       <main className="main-content">
