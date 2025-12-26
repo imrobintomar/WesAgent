@@ -81,14 +81,15 @@ function App() {
     }
 
     try {
-      // Use ngrok URL for API if provided, otherwise fallback to same host
-      const apiBase = import.meta.env.VITE_API_BASE_URL || "";
+      // Use absolute URL from env if available, otherwise relative for proxy
+      const apiBase = import.meta.env.VITE_API_BASE_URL;
       let wsUrl;
 
-      if (apiBase.startsWith("http")) {
-        // Convert https://... to wss://... or http://... to ws://...
+      if (apiBase && apiBase.startsWith("http")) {
+        // Absolute URL for production/ngrok
         wsUrl = apiBase.replace(/^http/, "ws") + "/ws/progress";
       } else {
+        // Relative URL for dev proxy
         const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
         const host = window.location.host;
         wsUrl = `${protocol}//${host}/ws/progress`;
@@ -146,7 +147,10 @@ function App() {
 
   // Get API base URL dynamically
   const getApiBase = () => {
-    return import.meta.env.VITE_API_BASE_URL || window.location.origin;
+    // If VITE_API_BASE_URL is set (absolute URL), use it.
+    // Otherwise, use empty string to allow Vite proxy to work in dev,
+    // or fallback to origin if needed.
+    return import.meta.env.VITE_API_BASE_URL || "";
   };
 
   const API_BASE = getApiBase();

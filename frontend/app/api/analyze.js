@@ -1,4 +1,4 @@
-const API_BASE = import.meta.env.VITE_API_BASE_URL || window.location.origin;
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 
 export async function analyzeFile({ file, prompt, disease }) {
   const formData = new FormData();
