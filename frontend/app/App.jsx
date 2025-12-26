@@ -159,6 +159,9 @@ function App() {
     try {
       const response = await fetch(`${baseUrl}/analyze`, {
         method: "POST",
+        headers: {
+          "ngrok-skip-browser-warning": "69420",
+        },
         body: formData,
       });
 
@@ -169,7 +172,11 @@ function App() {
 
       const poll = async () => {
         try {
-          const res = await fetch(`${baseUrl}/results/${job_id}`);
+          const res = await fetch(`${baseUrl}/results/${job_id}`, {
+            headers: {
+              "ngrok-skip-browser-warning": "69420",
+            }
+          });
           if (!res.ok) {
             console.error("Polling response not OK:", res.status);
             setTimeout(poll, 2000);
@@ -229,7 +236,7 @@ function App() {
   return (
     <div className="app">
       <header className="header">
-        <h1>🧬 WES Analysis Agent</h1>
+        <h1>🧬 Whole Exome Analysis Agent</h1>
         <p>Research-grade interpretation </p>
       </header>
 
@@ -246,7 +253,7 @@ function App() {
             </div>
 
             <div className="panel">
-              <h3>💬 Clinical Context/Phenotype</h3>
+              <h3>💬 Clinical Context / Phenotype</h3>
               <input type="text" className="input" placeholder="Disease" value={disease} onChange={e => setDisease(e.target.value)} />
               <input type="number" className="input" value={maxLitVariants} onChange={e => setMaxLitVariants(e.target.value)} />
             </div>
