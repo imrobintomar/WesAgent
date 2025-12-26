@@ -113,6 +113,11 @@ function App() {
         setProgressMessages((prev) => [...prev, event.data].slice(-20));
         setShowProgressPopup(true);
       };
+
+      ws.current.onerror = (err) => {
+        console.warn("WebSocket Error:", err);
+        setProgressMessages((prev) => [...prev, "⚠️ Connection issues. Falling back to polling..."].slice(-20));
+      };
     } catch (err) {
       console.error("WS Error:", err);
     }
