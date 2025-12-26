@@ -506,7 +506,7 @@ function App() {
       )}
 
       <footer className="footer">
-        <p>For Research Purpose only | API: {API_BASE}</p>
+        <p>For Research Purpose only | Contact Us </p>
       </footer>
     </div>
   );

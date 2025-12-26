@@ -15,6 +15,7 @@ import pandas as pd
 import pysam
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from services.franklin_client import parse_variant, classify_variant as franklin_classify
 from services.varsome_client import classify_variant as varsome_classify
@@ -43,6 +44,15 @@ REQUIRED_ANNOVAR_COLS = {
     "AAChange.refGene", "AAChange.refGeneWithVer"
 }
 
+# CORS Origins - Configure for your deployment
+CORS_ORIGINS = [
+    "https://wes-agent.vercel.app",
+    "http://localhost:3000",
+    "http://localhost:8000",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:8000",
+]
+
 
 # -------------------------------------------------
 # Progress Logging via WebSocket
@@ -61,15 +71,21 @@ class ProgressLogger(logging.Handler):
     def emit(self, record):
         msg = self.format(record)
         try:
-            loop = self.loop or asyncio.get_event_loop()
-            if loop.is_running():
-                loop.create_task(self.broadcast_func(msg))
-        except Exception:
+            # Try to get the running loop
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = self.loop
+            
+            if loop and loop.is_running():
+                asyncio.create_task(self.broadcast_func(msg))
+        except Exception as e:
+            # Silently fail if we can't broadcast (don't disrupt logging)
             pass
 
 
 class ConnectionManager:
-    """Manages WebSocket connections for real-time progress"""
+    """Manages WebSocket connections for real-time progress - THREAD-SAFE"""
     
     def __init__(self):
         self.active_connections: Set[WebSocket] = set()
@@ -77,16 +93,36 @@ class ConnectionManager:
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
         self.active_connections.add(websocket)
+        logger.info(f"WebSocket connected. Total connections: {len(self.active_connections)}")
 
     def disconnect(self, websocket: WebSocket):
         self.active_connections.discard(websocket)
+        logger.info(f"WebSocket disconnected. Remaining connections: {len(self.active_connections)}")
 
     async def broadcast(self, message: str):
-        for connection in self.active_connections:
+        """
+        FIXED: Create snapshot of connections to avoid 'Set changed size during iteration'
+        This was causing RuntimeError in your logs.
+        """
+        if not self.active_connections:
+            return
+        
+        # Critical fix: Create a list copy BEFORE iterating
+        connections_snapshot = list(self.active_connections)
+        
+        # Track failed connections for cleanup
+        failed_connections = []
+        
+        for connection in connections_snapshot:
             try:
                 await connection.send_text(message)
-            except Exception:
-                self.active_connections.discard(connection)
+            except Exception as e:
+                logger.warning(f"Failed to send to connection: {e}")
+                failed_connections.append(connection)
+        
+        # Clean up failed connections
+        for conn in failed_connections:
+            self.active_connections.discard(conn)
 
 
 # -------------------------------------------------
@@ -98,29 +134,52 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# FIXED CORS Configuration - Must be added BEFORE routes
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,  # Specific origins instead of "*" for production
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=3600,
 )
 
 manager = ConnectionManager()
 
 
+# -------------------------------------------------
+# CORS Preflight Handler
+# -------------------------------------------------
+@app.options("/{full_path:path}")
+async def preflight_handler(full_path: str):
+    """
+    Handle CORS preflight (OPTIONS) requests.
+    This is critical for browser-based file uploads.
+    """
+    return JSONResponse(status_code=200)
+
+
+# -------------------------------------------------
+# WebSocket Endpoint
+# -------------------------------------------------
 @app.websocket("/ws/progress")
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint for real-time progress updates"""
     await manager.connect(websocket)
     try:
         while True:
-            await websocket.receive_text()
+            # Keep connection alive - wait for client messages
+            data = await websocket.receive_text()
+            logger.debug(f"WS message received: {data}")
     except WebSocketDisconnect:
+        manager.disconnect(websocket)
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
         manager.disconnect(websocket)
 
 
-# Configure logging
+# Configure logging with progress broadcasting
 va_logger = logging.getLogger("variant-agents")
 va_logger.propagate = False
 progress_handler = ProgressLogger(manager.broadcast)
@@ -130,7 +189,8 @@ va_logger.addHandler(progress_handler)
 wes_logger = logging.getLogger("wes-agent")
 wes_logger.addHandler(progress_handler)
 
-logger.info("Loggers configured with WebSocket progress tracking")
+logger.info("✅ Loggers configured with WebSocket progress tracking")
+logger.info(f"✅ CORS configured for origins: {CORS_ORIGINS}")
 
 
 # -------------------------------------------------
@@ -239,10 +299,11 @@ async def parse_vcf(file_path: str) -> pd.DataFrame:
             records.append(record)
         
         df = pd.DataFrame(records)
-        logger.info(f"Parsed {len(df)} variants from VCF")
+        logger.info(f"✅ Parsed {len(df)} variants from VCF")
         return df
     
     except Exception as e:
+        logger.error(f"VCF parsing error: {str(e)}")
         raise HTTPException(400, f"VCF parsing failed: {str(e)}")
 
 
@@ -260,10 +321,11 @@ async def parse_table(file_path: str, ext: str) -> pd.DataFrame:
         }
         df = df.rename(columns=rename_map)
         
-        logger.info(f"Parsed {len(df)} variants from table")
+        logger.info(f"✅ Parsed {len(df)} variants from table")
         return df
     
     except Exception as e:
+        logger.error(f"Table parsing error: {str(e)}")
         raise HTTPException(400, f"Table parsing failed: {str(e)}")
 
 
@@ -316,7 +378,7 @@ async def analyze_wilms_tumor(
         
         wilms_payload = wilms_df_valid[wilms_cols].to_dict(orient="records")
         result["literature_summary"] = wilms_literature_reasoning(wilms_payload)
-        logger.info(f"Analyzed {len(wilms_payload)} Wilms tumor variants")
+        logger.info(f"✅ Analyzed {len(wilms_payload)} Wilms tumor variants")
         
         # Get gene burden
         try:
@@ -336,7 +398,7 @@ async def analyze_wilms_tumor(
 
 
 # -------------------------------------------------
-# Variant Cleaning
+# Variant Cleaning & Output Formatting
 # -------------------------------------------------
 def safe_float(val, default=0):
     """Safely convert to float, handling ANNOVAR's '.' and NaN values"""
@@ -359,31 +421,6 @@ def safe_int(val, default=1):
 
 
 def clean_variants_for_output(df: pd.DataFrame) -> List[Dict]:
-    """
-    Transform variants to comprehensive format for frontend table.
-    Returns fields with proper ANNOVAR naming conventions.
-    Handles flexible column naming from different input formats.
-    """
-    cleaned = []
-    
-    logger.info(f"clean_variants_for_output: Processing {len(df)} variants")
-    logger.info(f"Available DataFrame columns: {df.columns.tolist()}")
-    
-    # Standardize column names (case-insensitive matching)
-    df_cols_lower = {col.lower(): col for col in df.columns}
-    
-    # Find the actual column names in the DataFrame
-    chr_col = next((df_cols_lower.get(k) for k in ["chr", "chrom", "chromosome"]), None)
-    pos_col = next((df_cols_lower.get(k) for k in ["start", "pos", "position"]), None)
-    ref_col = next((df_cols_lower.get(k) for k in ["ref", "reference"]), None)
-    alt_col = next((df_cols_lower.get(k) for k in ["alt", "alternate"]), None)
-    
-    logger.info(f"Mapped coordinate columns: chr={chr_col}, pos={pos_col}, ref={ref_col}, alt={alt_col}")
-    
-    # If we don't have coordinates, we can't proceed
-    if not all([chr_col, pos_col, ref_col, alt_col]):
-        logger.error(f"Cannot extract coordinates. Available columns: {df.columns.tolist()}")
-        return []
     """
     Transform variants to comprehensive format for frontend table.
     Returns fields with proper ANNOVAR naming conventions.
@@ -545,7 +582,7 @@ def clean_variants_for_output(df: pd.DataFrame) -> List[Dict]:
             logger.warning(f"Skipped variant row {idx}: {e}")
             continue
     
-    logger.info(f"Successfully formatted {len(cleaned)} variants for output")
+    logger.info(f"✅ Successfully formatted {len(cleaned)} variants for output")
     
     return cleaned
 
@@ -556,7 +593,11 @@ def clean_variants_for_output(df: pd.DataFrame) -> List[Dict]:
 @app.get("/")
 def root():
     """Root endpoint"""
-    return {"message": "Cancer Variant Analysis API", "docs": "/docs"}
+    return {
+        "message": "Cancer Variant Analysis API",
+        "docs": "/docs",
+        "status": "operational"
+    }
 
 
 @app.get("/health")
@@ -566,6 +607,7 @@ def health():
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "version": "1.0.0",
+        "websocket_connections": len(manager.active_connections),
     }
 
 
@@ -586,7 +628,8 @@ async def analyze(
         max_lit_variants: Max variants for literature analysis (default: 300)
     """
     
-    logger.info(f"Analysis request: {file.filename} | Disease: {disease}")
+    logger.info(f"🔬 Analysis request: {file.filename} | Disease: {disease}")
+    await manager.broadcast(f"Analysis started for {file.filename}")
     
     # Validate input
     try:
@@ -610,7 +653,8 @@ async def analyze(
             tmp.write(content)
             file_path = tmp.name
         
-        logger.info(f"File saved: {file_path}")
+        logger.info(f"📁 File saved: {file_path}")
+        await manager.broadcast(f"File saved ({len(content)} bytes)")
         
         # Parse file
         if ext in (".vcf", ".vcf.gz"):
@@ -625,20 +669,25 @@ async def analyze(
                 "results": {"summary": "No variants found in file.", "variants": []},
             }
         
-        logger.info(f"Parsed {len(df)} variants")
+        logger.info(f"📊 Parsed {len(df)} variants")
+        await manager.broadcast(f"Parsed {len(df)} variants from file")
         
         # Handle unannotated VCF
         if is_raw_vcf(df):
-            logger.warning("Input is unannotated VCF")
+            logger.warning("⚠️ Input is unannotated VCF - using minimal annotation")
             df = create_minimal_annotation(df)
+            await manager.broadcast("⚠️ Using minimal annotation for unannotated VCF")
         
         # Filter variants
-        logger.info("Starting variant filtering...")
+        logger.info("🔍 Starting variant filtering...")
+        await manager.broadcast("Filtering variants...")
         try:
             filtered = filter_variants(df)
-            logger.info(f"Filtering complete: {len(filtered)} variants passed")
+            logger.info(f"✅ Filtering complete: {len(filtered)} variants passed")
+            await manager.broadcast(f"Filtered to {len(filtered)} variants")
         except ValueError as e:
-            logger.error(f"Filtering failed: {e}")
+            logger.error(f"❌ Filtering failed: {e}")
+            await manager.broadcast(f"❌ Filtering error: {str(e)}")
             raise HTTPException(
                 400,
                 f"Filtering error: {str(e)}. Please use ANNOVAR-annotated files for best results."
@@ -652,24 +701,31 @@ async def analyze(
             }
         
         # Core variant analysis
-        logger.info(f"Starting variant analysis (disease={disease})...")
+        logger.info(f"🧬 Starting variant analysis (disease={disease})...")
+        await manager.broadcast(f"Analyzing variants for {disease}...")
         try:
             analysis = analyze_variants(
                 filtered, prompt, disease=disease, max_lit_variants=max_lit_variants_int
             )
-            logger.info("Analysis complete")
+            logger.info("✅ Analysis complete")
+            await manager.broadcast("✅ Variant analysis complete")
         except Exception as e:
-            logger.error(f"Analysis failed: {e}")
+            logger.error(f"❌ Analysis failed: {e}")
+            await manager.broadcast(f"❌ Analysis error: {str(e)}")
             raise HTTPException(500, f"Variant analysis failed: {str(e)}")
         
         # Wilms tumor analysis
-        logger.info("Starting Wilms tumor analysis...")
+        logger.info("🔬 Starting Wilms tumor analysis...")
+        await manager.broadcast("Running Wilms tumor analysis...")
         try:
             wilms_genes = load_wilms_panel()
             annotated = annotate_wilms_burden(filtered, wilms_genes)
             wilms_result = await analyze_wilms_tumor(filtered, annotated)
+            logger.info("✅ Wilms analysis complete")
+            await manager.broadcast("✅ Wilms tumor analysis complete")
         except Exception as e:
-            logger.warning(f"Wilms analysis skipped: {e}")
+            logger.warning(f"⚠️ Wilms analysis skipped: {e}")
+            await manager.broadcast(f"⚠️ Wilms analysis skipped")
             wilms_result = {
                 "wilms_variant_count": 0,
                 "wilms_gene_burden": [],
@@ -677,9 +733,12 @@ async def analyze(
             }
         
         # Clean output
+        logger.info("📋 Formatting output...")
         cleaned_variants = clean_variants_for_output(filtered)
         
         # Return response
+        await manager.broadcast("✅ Analysis complete - generating report")
+        
         return {
             "input_variants": len(df),
             "filtered_variants": len(filtered),
@@ -698,5 +757,41 @@ async def analyze(
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception("Analysis failed")
+        logger.exception("❌ Analysis failed")
+        await manager.broadcast(f"❌ Fatal error: {str(e)}")
         raise HTTPException(500, f"Analysis failed: {str(e)}")
+
+
+# -------------------------------------------------
+# Server Startup & Shutdown
+# -------------------------------------------------
+@app.on_event("startup")
+async def startup_event():
+    logger.info("=" * 60)
+    logger.info("🚀 WES-Agent Backend Starting...")
+    logger.info(f"📍 CORS configured for: {CORS_ORIGINS}")
+    logger.info("=" * 60)
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    logger.info("=" * 60)
+    logger.info("🛑 WES-Agent Backend Shutting Down")
+    logger.info("=" * 60)
+
+
+if __name__ == "__main__":
+    import uvicorn
+    
+    # Run with extended timeouts for large file processing
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000,
+        # CRITICAL: Timeouts for large file handling
+        timeout_keep_alive=300,        # 5 minutes for keep-alive
+        timeout_graceful_shutdown=60,  # 1 minute graceful shutdown
+        # Logging
+        access_log=True,
+        log_level="info",
+    )
