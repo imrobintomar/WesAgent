@@ -314,7 +314,8 @@ function App() {
       setWorkflowSteps(["✓ Backend OK", "📤 Uploading file..."]);
 
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+      // Increase timeout to 120 seconds for large files during read
+      const timeoutId = setTimeout(() => controller.abort(), 120000);
 
       let response;
       try {
