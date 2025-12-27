@@ -10,6 +10,7 @@ import logging
 import tempfile
 import os
 import traceback
+import gzip
 from datetime import datetime
 from typing import Set, Dict, List, Optional, Tuple
 import uuid
@@ -337,23 +338,34 @@ async def parse_vcf(file_path: str) -> pd.DataFrame:
 import gzip
 
 async def parse_table(file_path: str, ext: str) -> pd.DataFrame:
-    """Parse CSV/TSV/TXT file with encoding detection and gzip support"""
+    """Parse CSV/TSV/TXT file with gzip and encoding detection"""
     try:
         logger.info(f"Parsing table ({ext}): {file_path}")
         
         sep = "," if ext == ".csv" else "\t"
         
-        # Try different encodings
-        encodings = ["utf-8", "latin-1", "iso-8859-1", "windows-1252", "cp1252"]
+        # Check if file is gzip compressed (magic bytes: 1f 8b)
+        with open(file_path, 'rb') as f:
+            magic_bytes = f.read(2)
+            is_gzip = magic_bytes == b'\x1f\x8b'
+        
         df = None
         
-        # Check if file is gzip compressed
-        try:
-            with gzip.open(file_path, 'rt', encoding='utf-8') as f:
-                df = pd.read_csv(f, sep=sep, dtype={"CHROM": str, "Chr": str}, low_memory=False)
-            logger.info(f"✓ File is gzip compressed, parsed successfully")
-        except (gzip.BadGzipFile, OSError, UnicodeDecodeError):
-            # Not gzip, try different encodings
+        if is_gzip:
+            logger.info(f"File is gzip compressed, attempting to decompress...")
+            encodings = ["utf-8", "latin-1", "iso-8859-1", "windows-1252", "cp1252"]
+            for encoding in encodings:
+                try:
+                    with gzip.open(file_path, 'rt', encoding=encoding) as f:
+                        df = pd.read_csv(f, sep=sep, dtype={"CHROM": str, "Chr": str}, low_memory=False)
+                    logger.info(f"✓ Gzip file parsed with encoding: {encoding}")
+                    break
+                except (UnicodeDecodeError, LookupError) as e:
+                    logger.debug(f"Failed with {encoding}: {e}")
+                    continue
+        else:
+            # Not gzip - try different encodings
+            encodings = ["utf-8", "latin-1", "iso-8859-1", "windows-1252", "cp1252"]
             for encoding in encodings:
                 try:
                     df = pd.read_csv(
@@ -365,11 +377,15 @@ async def parse_table(file_path: str, ext: str) -> pd.DataFrame:
                     )
                     logger.info(f"✓ File parsed with encoding: {encoding}")
                     break
-                except (UnicodeDecodeError, LookupError):
+                except (UnicodeDecodeError, LookupError) as e:
+                    logger.debug(f"Failed with {encoding}: {e}")
                     continue
         
-        if df is None:
-            raise ValueError(f"Could not parse file with any encoding. Tried: {', '.join(encodings)}")
+        if df is None or df.empty:
+            raise ValueError(
+                "Could not parse file. Tried encodings: " + 
+                ", ".join(["utf-8", "latin-1", "iso-8859-1", "windows-1252", "cp1252"])
+            )
         
         # Normalize column names
         df = df.rename(columns={
@@ -378,15 +394,18 @@ async def parse_table(file_path: str, ext: str) -> pd.DataFrame:
             "REFERENCE": "REF", "ALTERNATE": "ALT"
         })
         
-        logger.info(f"Parsed {len(df)} variants from table")
+        logger.info(f"✓ Parsed {len(df)} variants from table")
         return df
         
     except Exception as e:
         logger.error(f"Table parsing failed: {e}", exc_info=True)
+        error_msg = str(e)
+        if "Could not parse" in error_msg:
+            raise HTTPException(400, error_msg)
         raise HTTPException(
             400,
-            f"Failed to parse file. Error: {str(e)}. "
-            f"Make sure file is valid CSV/TSV/TXT (may be gzip compressed)."
+            f"Failed to parse file: {error_msg}. "
+            f"Supported: CSV/TSV/TXT (UTF-8, Latin-1, or gzip compressed)"
         )
 
 # ═══════════════════════════════════════════════════════════════

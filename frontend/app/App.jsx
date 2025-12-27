@@ -31,6 +31,7 @@ const API_BASE = getApiUrl();
 
 function getGene(v) {
   return (
+    v?.["Gene"] ||
     v?.["Gene.refGeneWithVer"] ||
     v?.["Gene.refGene"] ||
     v?.gene ||
@@ -191,6 +192,14 @@ function App() {
 
           setAnalysis(data?.summary || "");
           const variants = Array.isArray(data?.variants) ? data.variants : [];
+          
+          // Debug: Log first variant to check field names
+          if (variants.length > 0) {
+            console.log("📊 Sample variant:", variants[0]);
+            console.log("📊 Total variants received:", variants.length);
+            console.log("📊 Variant keys:", Object.keys(variants[0]));
+          }
+          
           setVariants(variants);
           
           // Use actual variants array length if metadata not available
@@ -253,13 +262,21 @@ function App() {
   };
 
   const filteredVariants = useMemo(() => {
-    if (!Array.isArray(variants) || variants.length === 0) return [];
+    if (!Array.isArray(variants) || variants.length === 0) {
+      console.log("❌ No variants to filter");
+      return [];
+    }
+    
     const q = geneSearch.toLowerCase();
-    return variants.filter((v) => {
+    const filtered = variants.filter((v) => {
       const gene = getGene(v).toLowerCase();
       const af = getAF(v);
-      return (q === "" || gene.includes(q)) && af <= afFilter;
+      const matches = (q === "" || gene.includes(q)) && af <= afFilter;
+      return matches;
     });
+    
+    console.log(`📊 Filtering: ${filtered.length}/${variants.length} variants pass filter (query="${q}", AF≤${afFilter})`);
+    return filtered;
   }, [variants, geneSearch, afFilter]);
 
   const handleFileUpload = (e) => {
@@ -616,6 +633,22 @@ function App() {
                 {variants.length === 0 && (
                   <p className="no-variants">No variants to display</p>
                 )}
+              </div>
+            )}
+
+            {!hasResults && !loading && error && (
+              <div className="panel error-panel">
+                <h3>❌ Analysis Failed</h3>
+                <p>{error}</p>
+                <p style={{ fontSize: "0.9em", color: "#666", marginTop: "10px" }}>
+                  <strong>Tips:</strong>
+                </p>
+                <ul style={{ fontSize: "0.9em", marginLeft: "20px" }}>
+                  <li>Make sure file is valid VCF, CSV, or TSV format</li>
+                  <li>Files can be gzip compressed (.vcf.gz, .txt.gz)</li>
+                  <li>Check file encoding (UTF-8 preferred)</li>
+                  <li>Try a smaller file first to test</li>
+                </ul>
               </div>
             )}
 
