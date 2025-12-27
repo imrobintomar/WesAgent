@@ -20,7 +20,7 @@ import "./App.css";
 const getApiUrl = () => {
   const envUrl = import.meta.env.VITE_API_BASE_URL;
   if (envUrl) return envUrl;
-  return ""; 
+  return "";
 };
 
 const API_BASE = getApiUrl();
@@ -34,6 +34,7 @@ function getGene(v) {
     v?.["Gene.refGeneWithVer"] ||
     v?.["Gene.refGene"] ||
     v?.gene ||
+    v?.["gene.refgene"] ||
     ""
   );
 }
@@ -74,53 +75,171 @@ function App() {
   const [error, setError] = useState("");
   const [hasResults, setHasResults] = useState(false);
 
+  // Job tracking
+  const [currentJobId, setCurrentJobId] = useState(null);
+  const [jobStatus, setJobStatus] = useState(null); // queued, processing, completed, failed
+
   // Real-time progress
   const [progressMessages, setProgressMessages] = useState([]);
   const [showProgressPopup, setShowProgressPopup] = useState(false);
-  const ws = useRef(null);
+  const wsRef = useRef(null);
+  const pollIntervalRef = useRef(null);
 
+  // Cleanup on unmount
   useEffect(() => {
     return () => {
-      if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-        ws.current.close();
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.close();
+      }
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
       }
     };
   }, []);
 
   const connectWebSocket = () => {
-    if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-      ws.current.close();
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.close();
     }
 
     try {
       let wsUrl;
       if (API_BASE.startsWith("http")) {
-        wsUrl = API_BASE.replace(/^http/, "ws").replace(/\/$/, "") + "/ws/progress";
+        wsUrl = API_BASE.replace(/^http/, "ws")
+          .replace(/\/$/, "")
+          .concat("/ws/progress");
       } else {
         const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
         wsUrl = `${protocol}//${window.location.host}/ws/progress`;
       }
 
-      console.log("Connecting WebSocket:", wsUrl);
-      ws.current = new WebSocket(wsUrl);
+      console.log("🔌 Connecting WebSocket:", wsUrl);
+      wsRef.current = new WebSocket(wsUrl);
 
-      ws.current.onopen = () => {
-        setProgressMessages(["Connected to server..."]);
+      wsRef.current.onopen = () => {
+        console.log("✅ WebSocket connected");
+        setProgressMessages(["✓ Connected to server..."]);
         setShowProgressPopup(true);
       };
 
-      ws.current.onmessage = (event) => {
-        setProgressMessages((prev) => [...prev, event.data].slice(-20));
-        setShowProgressPopup(true);
+      wsRef.current.onmessage = (event) => {
+        console.log("📨 Progress:", event.data);
+        setProgressMessages((prev) => [...prev, event.data].slice(-30));
       };
 
-      ws.current.onerror = (err) => {
-        console.warn("WebSocket Error:", err);
-        setProgressMessages((prev) => [...prev, " Connection issues. Falling back to polling..."].slice(-20));
+      wsRef.current.onerror = (err) => {
+        console.warn("⚠️ WebSocket Error:", err);
+        setProgressMessages((prev) => [
+          ...prev,
+          "⚠️ Connection issues - monitoring via polling...",
+        ].slice(-30));
+      };
+
+      wsRef.current.onclose = () => {
+        console.log("🔌 WebSocket disconnected");
       };
     } catch (err) {
-      console.error("WS Error:", err);
+      console.error("❌ WebSocket Error:", err);
+      setProgressMessages((prev) => [
+        ...prev,
+        "❌ WebSocket failed - using polling only",
+      ].slice(-30));
     }
+  };
+
+  // Start polling for job results
+  const startPolling = (jobId) => {
+    console.log("📊 Starting poll for job:", jobId);
+
+    const pollResults = async () => {
+      try {
+        const baseUrl = API_BASE.replace(/\/$/, "");
+        const res = await fetch(`${baseUrl}/results/${jobId}`, {
+          headers: {
+            "ngrok-skip-browser-warning": "69420",
+          },
+        });
+
+        if (!res.ok) {
+          console.error("❌ Polling response not OK:", res.status);
+          return;
+        }
+
+        const contentType = res.headers.get("content-type");
+        if (!contentType || !contentType.includes("application/json")) {
+          const text = await res.text();
+          console.error("❌ Expected JSON but received:", text.slice(0, 100));
+          return;
+        }
+
+        const jobData = await res.json();
+        console.log("📊 Job data:", jobData);
+
+        setJobStatus(jobData.status);
+
+        if (jobData.status === "processing") {
+          setWorkflowSteps(["⏳ Parsing file...", "⏳ Analyzing variants..."]);
+        }
+
+        if (jobData.status === "completed") {
+          console.log("✅ Analysis complete!");
+          const data = jobData.results;
+
+          setAnalysis(data?.summary || "");
+          setVariants(Array.isArray(data?.variants) ? data.variants : []);
+          setWorkflowSteps([
+            `✓ Input: ${data?.variants_input || 0} variants`,
+            `✓ Filtered: ${data?.variants_filtered || 0} variants`,
+            `✓ Analysis complete`,
+          ]);
+
+          setHasResults(true);
+          setLoading(false);
+
+          // Stop polling
+          if (pollIntervalRef.current) {
+            clearInterval(pollIntervalRef.current);
+            pollIntervalRef.current = null;
+          }
+
+          setProgressMessages((prev) => [
+            ...prev,
+            "✅ Analysis completed successfully!",
+          ].slice(-30));
+        } else if (
+          jobData.status === "error" ||
+          jobData.status === "failed"
+        ) {
+          console.error("❌ Job failed:", jobData.error);
+          setError(jobData.error || "Analysis failed");
+          setJobStatus("failed");
+          setLoading(false);
+
+          // Stop polling
+          if (pollIntervalRef.current) {
+            clearInterval(pollIntervalRef.current);
+            pollIntervalRef.current = null;
+          }
+
+          setProgressMessages((prev) => [
+            ...prev,
+            `❌ Error: ${jobData.error}`,
+          ].slice(-30));
+        }
+      } catch (pollErr) {
+        console.error("❌ Polling error:", pollErr);
+        setProgressMessages((prev) => [
+          ...prev,
+          `⚠️ Polling error: ${pollErr.message}`,
+        ].slice(-30));
+      }
+    };
+
+    // Poll every 2 seconds
+    pollIntervalRef.current = setInterval(pollResults, 2000);
+
+    // Also call it immediately
+    pollResults();
   };
 
   const filteredVariants = useMemo(() => {
@@ -137,15 +256,21 @@ function App() {
     const file = e.target.files?.[0];
     if (!file) return;
     setVcfFile(file);
+    setError(""); // Clear any previous errors
   };
 
   const handleAnalyze = async () => {
-    if (!vcfFile) return setError("Please upload a file");
-    
+    if (!vcfFile) {
+      setError("Please upload a file");
+      return;
+    }
+
     setLoading(true);
     setHasResults(false);
     setError("");
     setProgressMessages([]);
+    setWorkflowSteps(["⏳ Submitting file..."]);
+    setJobStatus("queued");
     connectWebSocket();
 
     const formData = new FormData();
@@ -155,8 +280,9 @@ function App() {
     formData.append("max_lit_variants", String(maxLitVariants));
 
     const baseUrl = API_BASE.replace(/\/$/, "");
-    
+
     try {
+      console.log("📤 Uploading file to:", baseUrl);
       const response = await fetch(`${baseUrl}/analyze`, {
         method: "POST",
         headers: {
@@ -165,79 +291,59 @@ function App() {
         body: formData,
       });
 
-      if (!response.ok) throw new Error(await response.text());
+      const data = await response.json();
+      console.log("✅ Submit response:", data);
 
-      const { job_id } = await response.json();
-      console.log("Job queued:", job_id);
+      if (!response.ok) {
+        throw new Error(data.error || "Upload failed");
+      }
 
-      const poll = async () => {
-        try {
-          const res = await fetch(`${baseUrl}/results/${job_id}`, {
-            headers: {
-              "ngrok-skip-browser-warning": "69420",
-            }
-          });
-          if (!res.ok) {
-            console.error("Polling response not OK:", res.status);
-            setTimeout(poll, 2000);
-            return;
-          }
+      const jobId = data.job_id;
+      console.log("🎯 Job ID:", jobId);
 
-          const contentType = res.headers.get("content-type");
-          if (!contentType || !contentType.includes("application/json")) {
-            const text = await res.text();
-            console.error("Expected JSON but received:", text.slice(0, 100));
-            setTimeout(poll, 2000);
-            return;
-          }
+      setCurrentJobId(jobId);
+      setProgressMessages((prev) => [
+        ...prev,
+        `✓ Job submitted: ${jobId}`,
+      ].slice(-30));
+      setWorkflowSteps([`✓ File submitted`, `⏳ Processing...`]);
 
-          const jobData = await res.json();
-
-          if (jobData.status === "completed") {
-            const data = jobData.results;
-            setAnalysis(data?.summary || "");
-            setVariants(data?.variants || []);
-            setWorkflowSteps([
-              `Input: ${data?.input_variants}`,
-              `Filtered: ${data?.filtered_variants}`,
-            ]);
-            setHasResults(true);
-            setLoading(false);
-          } else if (jobData.status === "error" || jobData.status === "failed") {
-            setError(jobData.error || "Analysis failed");
-            setLoading(false);
-          } else {
-            setTimeout(poll, 2000);
-          }
-        } catch (pollErr) {
-          console.error("Polling error:", pollErr);
-          setTimeout(poll, 5000);
-        }
-      };
-      poll();
+      // Start polling for results
+      startPolling(jobId);
     } catch (err) {
-      setError(err.message);
+      console.error("❌ Upload error:", err);
+      setError(err.message || "Failed to submit analysis");
       setLoading(false);
+      setJobStatus("failed");
     }
   };
 
   const exportToCSV = () => {
-    if (filteredVariants.length === 0) return;
+    if (filteredVariants.length === 0) {
+      setError("No variants to export");
+      return;
+    }
     const headers = Object.keys(filteredVariants[0]);
-    const csv = [headers.join(","), ...filteredVariants.map(v => headers.map(h => JSON.stringify(v[h])).join(","))].join("\n");
+    const csv = [
+      headers.join(","),
+      ...filteredVariants.map((v) =>
+        headers.map((h) => JSON.stringify(v[h])).join(",")
+      ),
+    ].join("\n");
     const blob = new Blob([csv], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
     a.download = "variants.csv";
     a.click();
+    URL.revokeObjectURL(url);
   };
 
   return (
     <div className="app">
       <header className="header">
         <h1>🧬 Whole Exome Analysis Agent</h1>
-        <p>Research-grade interpretation </p>
+        <p>Research-grade interpretation - Non-blocking async analysis</p>
       </header>
 
       <main className="main-content">
@@ -245,55 +351,174 @@ function App() {
           <aside className="sidebar">
             <div className="panel">
               <h3>📁 Upload VCF</h3>
-              <div className="upload-area" onClick={() => document.getElementById("vcf-upload")?.click()}>
+              <div
+                className="upload-area"
+                onClick={() => document.getElementById("vcf-upload")?.click()}
+                style={{
+                  opacity: loading ? 0.5 : 1,
+                  cursor: loading ? "not-allowed" : "pointer",
+                }}
+              >
                 <Upload size={32} />
                 <p>{vcfFile ? vcfFile.name : "Click to upload"}</p>
               </div>
-              <input id="vcf-upload" type="file" hidden onChange={handleFileUpload} />
+              <input
+                id="vcf-upload"
+                type="file"
+                hidden
+                onChange={handleFileUpload}
+                disabled={loading}
+              />
             </div>
 
             <div className="panel">
-              <h3>💬 Clinical Context / Phenotype</h3>
-              <input type="text" className="input" placeholder="Disease" value={disease} onChange={e => setDisease(e.target.value)} />
-              <input type="number" className="input" value={maxLitVariants} onChange={e => setMaxLitVariants(e.target.value)} />
+              <h3>📋 Analysis Settings</h3>
+              <label className="label-small">Disease/Phenotype</label>
+              <input
+                type="text"
+                className="input"
+                placeholder="e.g., Wilms, Cancer"
+                value={disease}
+                onChange={(e) => setDisease(e.target.value)}
+                disabled={loading}
+              />
+
+              <label className="label-small" style={{ marginTop: 10 }}>
+                Max Literature Variants
+              </label>
+              <input
+                type="number"
+                className="input"
+                value={maxLitVariants}
+                onChange={(e) => setMaxLitVariants(Number(e.target.value))}
+                disabled={loading}
+              />
             </div>
 
             <div className="panel">
-              <h3>💬 Prompt</h3>
-              <textarea className="textarea" rows="5" value={userPrompt} onChange={e => setUserPrompt(e.target.value)} />
-              <button className="btn btn-primary btn-full" onClick={handleAnalyze} disabled={loading || !vcfFile}>
-                {loading ? <Loader className="spin" /> : <Send />} Analyze
+              <h3>💬 Analysis Prompt</h3>
+              <textarea
+                className="textarea"
+                rows="5"
+                value={userPrompt}
+                onChange={(e) => setUserPrompt(e.target.value)}
+                disabled={loading}
+                placeholder="Describe what you want to analyze..."
+              />
+              <button
+                className="btn btn-primary btn-full"
+                onClick={handleAnalyze}
+                disabled={loading || !vcfFile}
+              >
+                {loading ? (
+                  <>
+                    <Loader className="spin" size={16} /> Analyzing...
+                  </>
+                ) : (
+                  <>
+                    <Send size={16} /> Analyze
+                  </>
+                )}
               </button>
             </div>
 
             {hasResults && (
               <div className="panel">
-                <h3><Filter size={18} /> Filters</h3>
-                <input type="text" className="input" placeholder="Search Gene" value={geneSearch} onChange={e => setGeneSearch(e.target.value)} />
-                <input type="range" min="0" max="0.1" step="0.001" value={afFilter} onChange={e => setAfFilter(Number(e.target.value))} />
-                <button className="btn btn-small" onClick={exportToCSV} style={{ marginTop: 10, width: "100%" }}>Download CSV</button>
+                <h3>
+                  <Filter size={18} /> Filters
+                </h3>
+                <label className="label-small">Search Gene</label>
+                <input
+                  type="text"
+                  className="input"
+                  placeholder="e.g., TP53"
+                  value={geneSearch}
+                  onChange={(e) => setGeneSearch(e.target.value)}
+                />
+
+                <label className="label-small" style={{ marginTop: 10 }}>
+                  AF Filter (≤ {afFilter.toFixed(3)})
+                </label>
+                <input
+                  type="range"
+                  min="0"
+                  max="0.1"
+                  step="0.001"
+                  value={afFilter}
+                  onChange={(e) => setAfFilter(Number(e.target.value))}
+                />
+
+                <button
+                  className="btn btn-small"
+                  onClick={exportToCSV}
+                  style={{ marginTop: 15, width: "100%" }}
+                >
+                  <Download size={14} /> Download CSV
+                </button>
               </div>
             )}
           </aside>
 
           <section className="content">
-            {error && <div className="alert alert-error"><AlertCircle /> {error}</div>}
+            {error && (
+              <div className="alert alert-error">
+                <AlertCircle size={18} /> {error}
+              </div>
+            )}
+
             {workflowSteps.length > 0 && (
               <div className="panel">
                 <h3>🔄 Workflow</h3>
                 <ul className="steps-list">
                   {workflowSteps.map((s, i) => (
-                    <li key={i}>✓ {s}</li>
+                    <li key={i}>{s}</li>
                   ))}
                 </ul>
               </div>
             )}
-            {hasResults && <VariantVisuals variants={filteredVariants} />}
+
+            {loading && currentJobId && (
+              <div className="panel">
+                <div className="status-info">
+                  <Loader size={20} className="spin" />
+                  <div>
+                    <strong>Job in Progress</strong>
+                    <p className="job-id-small">ID: {currentJobId}</p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {hasResults && filteredVariants.length > 0 && (
+              <VariantVisuals variants={filteredVariants} />
+            )}
+
             {hasResults && (
               <div className="panel results-panel">
-                <h3>📊 Results</h3>
-                <pre className="report-text">{analysis}</pre>
-                <VariantTable variants={filteredVariants} geneQuery={geneSearch} />
+                <h3>📊 Analysis Results</h3>
+                {analysis && (
+                  <>
+                    <h4 style={{ marginTop: 0 }}>Summary</h4>
+                    <pre className="report-text">{analysis}</pre>
+                  </>
+                )}
+                {filteredVariants.length > 0 && (
+                  <>
+                    <h4>Variants ({filteredVariants.length})</h4>
+                    <VariantTable variants={filteredVariants} geneQuery={geneSearch} />
+                  </>
+                )}
+                {filteredVariants.length === 0 && variants.length > 0 && (
+                  <p className="no-variants">
+                    No variants match current filters. Adjust AF threshold or gene search.
+                  </p>
+                )}
+              </div>
+            )}
+
+            {!hasResults && !loading && !error && (
+              <div className="panel empty-state">
+                <p>📁 Upload a VCF file and configure your analysis</p>
               </div>
             )}
           </section>
@@ -303,11 +528,38 @@ function App() {
       {showProgressPopup && (
         <div className="progress-popup">
           <div className="progress-popup-header">
-            <h4>🔴 Live Progress</h4>
-            <button onClick={() => setShowProgressPopup(false)} className="close-btn"><X size={16} /></button>
+            <div className="progress-header-title">
+              <span
+                className="pulse-dot"
+                style={{
+                  background:
+                    jobStatus === "completed"
+                      ? "#10b981"
+                      : jobStatus === "failed"
+                        ? "#ef4444"
+                        : "#f59e0b",
+                }}
+              />
+              <h4>Live Progress</h4>
+            </div>
+            <button
+              onClick={() => setShowProgressPopup(false)}
+              className="close-btn"
+              title="Close"
+            >
+              <X size={16} />
+            </button>
           </div>
           <div className="progress-popup-content">
-            {progressMessages.map((msg, i) => <div key={i} className="progress-log-item">» {msg}</div>)}
+            {progressMessages.length === 0 ? (
+              <div className="progress-log-item">Waiting for updates...</div>
+            ) : (
+              progressMessages.map((msg, i) => (
+                <div key={i} className="progress-log-item">
+                  {msg}
+                </div>
+              ))
+            )}
           </div>
         </div>
       )}
