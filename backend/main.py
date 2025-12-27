@@ -29,8 +29,6 @@ from variant_agents import (
 )
 from panels.wilms_panel import load_wilms_panel
 from burden_engine import annotate_wilms_burden, wilms_gene_burden
-from fastapi import FastAPI
-
 
 # ═══════════════════════════════════════════════════════════════
 # CONFIGURATION
@@ -131,6 +129,77 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Add middleware to ensure CORS headers on all responses
+@app.middleware("http")
+async def add_cors_headers(request, call_next):
+    """Add CORS headers to every response"""
+    try:
+        response = await call_next(request)
+    except Exception as e:
+        logger.error(f"Middleware error: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e), "success": False},
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "*",
+                "Access-Control-Allow-Headers": "*",
+            }
+        )
+    
+    # Ensure CORS headers exist
+    if "access-control-allow-origin" not in response.headers:
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "*"
+        response.headers["Access-Control-Allow-Headers"] = "*"
+    
+    return response
+
+# Add error handler to ensure CORS headers are in error responses
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import PlainTextResponse
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request, exc):
+    """Catch all exceptions and ensure CORS headers are present"""
+    logger.error(f"Unhandled exception: {exc}", exc_info=True)
+    
+    status_code = 500
+    if isinstance(exc, HTTPException):
+        status_code = exc.status_code
+    
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "error": str(exc),
+            "success": False
+        },
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Credentials": "true",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        }
+    )
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request, exc):
+    """Handle HTTP exceptions with CORS headers"""
+    logger.warning(f"HTTP Exception {exc.status_code}: {exc.detail}")
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": exc.detail,
+            "success": False
+        },
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Credentials": "true",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        }
+    )
 
 manager = ConnectionManager()
 
@@ -497,86 +566,114 @@ async def analyze(
     max_lit_variants: str = Form("300"),
 ):
     """
-    Submit variant analysis job - RETURNS IMMEDIATELY
+    Submit variant analysis job - RETURNS IMMEDIATELY (< 1 second)
     
-    Analysis runs asynchronously in background. Frontend should:
-    1. Get job_id from response
-    2. Connect to WebSocket /ws/progress for live updates
-    3. Poll /results/{job_id} to check status and get results
+    CRITICAL: This endpoint must return BEFORE any heavy processing
+    to avoid Cloudflare/proxy timeouts (524 errors).
     
-    Parameters:
-    - file: VCF, VCF.GZ, CSV, TSV, or TXT file
-    - prompt: Custom analysis prompt
-    - disease: Disease type (e.g., "Wilms", "Unknown")
-    - max_lit_variants: Maximum variants to analyze (default: 300)
-    
-    Response: 202 Accepted - Job submitted successfully
+    All processing is async in background.
     """
     job_id = str(uuid.uuid4())
     
-    try:
-        logger.info(f"Job {job_id}: New analysis request - {file.filename}")
-        
-        # Validate filename
-        if not file.filename:
-            raise HTTPException(400, "No filename provided")
-        
-        # Validate extension
-        ext = next(
-            (e for e in VALID_EXTENSIONS if file.filename.lower().endswith(e)),
-            None
+    # Validate inputs FIRST (quick checks only)
+    if not file.filename:
+        raise HTTPException(400, "No filename provided")
+    
+    ext = next(
+        (e for e in VALID_EXTENSIONS if file.filename.lower().endswith(e)),
+        None
+    )
+    if not ext:
+        raise HTTPException(
+            400,
+            f"Invalid file type. Supported: {', '.join(VALID_EXTENSIONS)}"
         )
-        if not ext:
-            raise HTTPException(
-                400,
-                f"Invalid file type. Supported: {', '.join(VALID_EXTENSIONS)}"
-            )
-        
-        # Parse max_lit_variants
-        try:
-            max_lit_variants_int = int(max_lit_variants)
-            max_lit_variants_int = max(1, min(max_lit_variants_int, 10000))
-        except (ValueError, TypeError):
-            max_lit_variants_int = 300
-        
-        # Create job record IMMEDIATELY
-        jobs_db[job_id] = {
+    
+    try:
+        max_lit_variants_int = int(max_lit_variants)
+        max_lit_variants_int = max(1, min(max_lit_variants_int, 10000))
+    except (ValueError, TypeError):
+        max_lit_variants_int = 300
+    
+    # Create job record (instant)
+    jobs_db[job_id] = {
+        "status": "queued",
+        "filename": file.filename,
+        "disease": disease,
+        "max_lit_variants": max_lit_variants_int,
+        "created_at": datetime.now().isoformat()
+    }
+    logger.info(f"Job {job_id}: Created for {file.filename}")
+    
+    # Queue background task (returns immediately)
+    background_tasks.add_task(
+        process_file_and_analyze,
+        job_id=job_id,
+        file=file,
+        ext=ext,
+        prompt=prompt,
+        disease=disease,
+        max_lit_variants_int=max_lit_variants_int,
+    )
+    
+    logger.info(f"Job {job_id}: Task queued - returning immediately")
+    
+    # RETURN BEFORE ANY FILE PROCESSING (< 100ms)
+    return JSONResponse(
+        status_code=202,
+        content={
+            "success": True,
+            "job_id": job_id,
             "status": "queued",
             "filename": file.filename,
-            "disease": disease,
-            "max_lit_variants": max_lit_variants_int,
-            "created_at": datetime.now().isoformat()
+            "message": "Analysis queued successfully"
+        },
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "*",
+            "Access-Control-Allow-Headers": "*",
         }
-        logger.info(f"Job {job_id}: Record created")
+    )
+
+
+# NEW: Process file and analysis in background (not blocking response)
+async def process_file_and_analyze(
+    job_id: str,
+    file: UploadFile,
+    ext: str,
+    prompt: str,
+    disease: str,
+    max_lit_variants_int: int,
+):
+    """Background task - read file and run analysis"""
+    try:
+        logger.info(f"Job {job_id}: Background processing started")
+        await manager.broadcast(f"Job {job_id}: Starting analysis...")
         
-        # Read file
+        # Read file in background
         try:
-            content = await asyncio.wait_for(file.read(), timeout=30.0)
+            content = await asyncio.wait_for(file.read(), timeout=60.0)
             if not content:
-                raise HTTPException(400, "File is empty")
-            logger.info(f"Job {job_id}: File read successfully ({len(content)} bytes)")
+                raise ValueError("File is empty")
+            logger.info(f"Job {job_id}: File read ({len(content)} bytes)")
         except asyncio.TimeoutError:
-            raise HTTPException(408, "File read timeout")
+            raise ValueError("File read timeout")
         except Exception as e:
-            logger.error(f"File read error: {e}")
-            raise HTTPException(400, f"Failed to read file: {str(e)}")
+            raise ValueError(f"File read failed: {str(e)}")
         
-        # Create temp file
+        # Write temp file
         tmp = None
         try:
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
             tmp.write(content)
             tmp.close()
-            logger.info(f"Job {job_id}: Temp file created at {tmp.name}")
+            logger.info(f"Job {job_id}: Temp file created")
         except Exception as e:
-            logger.error(f"Temp file creation failed: {e}")
-            jobs_db[job_id]["status"] = "error"
-            jobs_db[job_id]["error"] = f"Failed to create temp file: {str(e)}"
-            raise HTTPException(500, f"Server error: {str(e)}")
+            logger.error(f"Job {job_id}: Temp file error: {e}")
+            raise ValueError(f"Failed to create temp file: {str(e)}")
         
-        # QUEUE BACKGROUND TASK - DON'T WAIT FOR IT
-        background_tasks.add_task(
-            run_analysis_task,
+        # Run analysis task
+        await run_analysis_task(
             job_id=job_id,
             file_path=tmp.name,
             ext=ext,
@@ -586,34 +683,14 @@ async def analyze(
             original_df_len=0
         )
         
-        logger.info(f"Job {job_id}: Queued for background processing - RETURNING JOB_ID NOW")
-        await manager.broadcast(f"Job {job_id}: Analysis job submitted")
-        
-        # RETURN IMMEDIATELY WITH JOB_ID (Status 202 = Accepted)
-        return JSONResponse(
-            status_code=202,
-            content={
-                "success": True,
-                "job_id": job_id,
-                "status": "queued",
-                "filename": file.filename,
-                "message": "Analysis started. Use job_id to poll /results/{job_id}",
-                "next_steps": [
-                    f"1. Poll GET /results/{job_id} every 2-3 seconds",
-                    "2. Connect WebSocket to /ws/progress for live updates",
-                    "3. When status='completed', results will be in response"
-                ]
-            }
-        )
-        
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.error(f"Unexpected error in /analyze: {e}", exc_info=True)
-        if job_id in jobs_db:
-            jobs_db[job_id]["status"] = "error"
-            jobs_db[job_id]["error"] = str(e)
-        raise HTTPException(500, f"Server error: {str(e)}")
+        logger.error(f"Job {job_id}: Background processing failed: {e}", exc_info=True)
+        jobs_db[job_id] = {
+            "status": "failed",
+            "error": str(e),
+            "failed_at": datetime.now().isoformat()
+        }
+        await manager.broadcast(f"Job {job_id}: ❌ Error - {str(e)}")
 
 @app.get("/results/{job_id}")
 async def get_results(job_id: str):

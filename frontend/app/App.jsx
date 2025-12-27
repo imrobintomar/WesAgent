@@ -259,6 +259,31 @@ function App() {
     setError(""); // Clear any previous errors
   };
 
+  // Check backend health before submitting
+  const checkBackendHealth = async (baseUrl) => {
+    try {
+      console.log("🏥 Checking backend health...");
+      const response = await fetch(`${baseUrl}/health`, {
+        headers: {
+          "ngrok-skip-browser-warning": "69420",
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(`Backend returned ${response.status}`);
+      }
+
+      const data = await response.json();
+      console.log("✅ Backend healthy:", data);
+      return true;
+    } catch (err) {
+      console.error("❌ Backend health check failed:", err);
+      throw new Error(
+        `Backend is not responding. Error: ${err.message}. Make sure the server is running.`
+      );
+    }
+  };
+
   const handleAnalyze = async () => {
     if (!vcfFile) {
       setError("Please upload a file");
@@ -269,36 +294,75 @@ function App() {
     setHasResults(false);
     setError("");
     setProgressMessages([]);
-    setWorkflowSteps(["⏳ Submitting file..."]);
+    setWorkflowSteps(["🏥 Checking backend...", "⏳ Submitting file..."]);
     setJobStatus("queued");
     connectWebSocket();
-
-    const formData = new FormData();
-    formData.append("file", vcfFile);
-    formData.append("prompt", userPrompt);
-    formData.append("disease", disease);
-    formData.append("max_lit_variants", String(maxLitVariants));
 
     const baseUrl = API_BASE.replace(/\/$/, "");
 
     try {
-      console.log("📤 Uploading file to:", baseUrl);
-      const response = await fetch(`${baseUrl}/analyze`, {
-        method: "POST",
-        headers: {
-          "ngrok-skip-browser-warning": "69420",
-        },
-        body: formData,
-      });
+      // Check health first
+      await checkBackendHealth(baseUrl);
 
-      const data = await response.json();
+      const formData = new FormData();
+      formData.append("file", vcfFile);
+      formData.append("prompt", userPrompt);
+      formData.append("disease", disease);
+      formData.append("max_lit_variants", String(maxLitVariants));
+
+      console.log("📤 Uploading file to:", baseUrl);
+      setWorkflowSteps(["✓ Backend OK", "📤 Uploading file..."]);
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+
+      let response;
+      try {
+        response = await fetch(`${baseUrl}/analyze`, {
+          method: "POST",
+          headers: {
+            "ngrok-skip-browser-warning": "69420",
+          },
+          body: formData,
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timeoutId);
+      }
+
+      console.log("📨 Response status:", response.status);
+      console.log("📨 Response headers:", Object.fromEntries(response.headers));
+
+      let data;
+      try {
+        data = await response.json();
+      } catch (jsonErr) {
+        console.error("❌ Failed to parse JSON response:", jsonErr);
+        const text = await response.text();
+        console.error("Response text:", text);
+        
+        if (response.status === 524) {
+          throw new Error(
+            "Backend timeout (524). The analysis is queued but taking longer than expected. Try again in 30 seconds."
+          );
+        }
+        
+        throw new Error(
+          `Server returned invalid JSON (${response.status}): ${text.slice(0, 100)}`
+        );
+      }
+
       console.log("✅ Submit response:", data);
 
       if (!response.ok) {
-        throw new Error(data.error || "Upload failed");
+        throw new Error(data.error || `Server error: ${response.status}`);
       }
 
       const jobId = data.job_id;
+      if (!jobId) {
+        throw new Error("No job_id returned from server");
+      }
+
       console.log("🎯 Job ID:", jobId);
 
       setCurrentJobId(jobId);
@@ -306,15 +370,29 @@ function App() {
         ...prev,
         `✓ Job submitted: ${jobId}`,
       ].slice(-30));
-      setWorkflowSteps([`✓ File submitted`, `⏳ Processing...`]);
+      setWorkflowSteps([`✓ Backend OK`, `✓ File uploaded`, `⏳ Processing...`]);
 
       // Start polling for results
       startPolling(jobId);
     } catch (err) {
-      console.error("❌ Upload error:", err);
-      setError(err.message || "Failed to submit analysis");
+      console.error("❌ Analysis error:", err);
+      
+      // Better error messages
+      let errorMsg = err.message;
+      if (err.name === "AbortError") {
+        errorMsg = "Request timeout (>30s). Backend may be overloaded. Try again later.";
+      } else if (errorMsg.includes("NetworkError")) {
+        errorMsg = "Network error. Check your connection and make sure backend is running.";
+      }
+      
+      setError(errorMsg);
       setLoading(false);
       setJobStatus("failed");
+      setWorkflowSteps([]);
+      setProgressMessages((prev) => [
+        ...prev,
+        `❌ Error: ${errorMsg}`,
+      ].slice(-30));
     }
   };
 
@@ -343,7 +421,7 @@ function App() {
     <div className="app">
       <header className="header">
         <h1>🧬 Whole Exome Analysis Agent</h1>
-        <p>Research-grade interpretation </p>
+        <p>Research-grade interpretation - Non-blocking async analysis</p>
       </header>
 
       <main className="main-content">
