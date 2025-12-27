@@ -449,7 +449,7 @@ function App() {
     <div className="app">
       <header className="header">
         <h1>🧬 Whole Exome Analysis Agent</h1>
-        <p>Research-grade interpretation - Non-blocking async analysis</p>
+        <p>Research-grade interpretation </p>
       </header>
 
       <main className="main-content">
@@ -478,7 +478,7 @@ function App() {
             </div>
 
             <div className="panel">
-              <h3>📋 Analysis Settings</h3>
+              <h3>Analysis Settings</h3>
               <label className="label-small">Disease/Phenotype</label>
               <input
                 type="text"
@@ -502,7 +502,7 @@ function App() {
             </div>
 
             <div className="panel">
-              <h3>💬 Analysis Prompt</h3>
+              <h3> Analysis Prompt</h3>
               <textarea
                 className="textarea"
                 rows="5"
@@ -518,7 +518,7 @@ function App() {
               >
                 {loading ? (
                   <>
-                    <Loader className="spin" size={16} /> Analyzing...
+                    <Loader className="spin" size={16} /> Analyzing Please Wait...
                   </>
                 ) : (
                   <>
@@ -574,7 +574,7 @@ function App() {
 
             {workflowSteps.length > 0 && (
               <div className="panel">
-                <h3>🔄 Workflow</h3>
+                <h3> Workflow</h3>
                 <ul className="steps-list">
                   {workflowSteps.map((s, i) => (
                     <li key={i}>{s}</li>
@@ -638,7 +638,7 @@ function App() {
 
             {!hasResults && !loading && error && (
               <div className="panel error-panel">
-                <h3>❌ Analysis Failed</h3>
+                <h3> Analysis Failed</h3>
                 <p>{error}</p>
                 <p style={{ fontSize: "0.9em", color: "#666", marginTop: "10px" }}>
                   <strong>Tips:</strong>

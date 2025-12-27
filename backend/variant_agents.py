@@ -325,10 +325,10 @@ def prioritize_variants(variants: List[Dict], max_variants: int = 300) -> List[D
 # -----------------------------
 # Batch Literature Analysis
 # -----------------------------
-def analyze_variants_literature(variants: List[Dict], disease: str, max_variants: int = 300) -> List[Dict]:
+def analyze_variants_literature(variants: List[Dict], disease: str, max_variants: int = 30) -> List[Dict]:
     """
     Perform literature evidence check on prioritized variants for the specified disease.
-    Only analyzes top 300 variants (by default) for efficiency.
+    Only analyzes top 30 variants (by default) for efficiency.
     """
     
     # Prioritize variants
@@ -358,7 +358,7 @@ def ollama_reasoning(variants: List[Dict], user_prompt: str, disease: str = "") 
     
     disease_context = f"Disease context: {disease}\n" if disease else ""
     
-    prompt = f"""You are a Genetic  expert.
+    prompt = f"""You are a genomics researcher And expert in the genetics genomics.
 
 User question:
 {user_prompt}
@@ -372,8 +372,7 @@ Below are filtered variants with literature evidence assessments. Perform the fo
 3. Evaluate literature evidence in context of the specified disease
 4. Highlight variants with strong disease association
 5. Highlight actionable variants with therapeutic implications
-6. Summarize key findings and clinical recommendations
-7. Cite relevant literature (no hallucinated PMIDs - only mention if confident)
+6. Cite relevant literature (no hallucinated PMIDs - only mention if confident)
 
 Return clear, evidence-based analysis.
 

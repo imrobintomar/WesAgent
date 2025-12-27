@@ -585,9 +585,35 @@ async def run_analysis_task(
         annotated = annotate_wilms_burden(filtered, wilms_genes)
         wilms_result = await analyze_wilms_tumor(filtered, annotated)
         
-        # Clean output
+        # Clean output - USE the analyzed variants from analyze_variants, not the raw dataframe
         await manager.broadcast(f"Job {job_id}: Formatting results...")
-        cleaned_variants = clean_variants_for_output(filtered)
+        analyzed_variants = analysis.get("variants", [])
+        
+        # Convert analyzed variants (which are dicts) to the output format
+        cleaned_variants = []
+        for v in analyzed_variants:
+            cleaned_variants.append({
+                "Variant": f"{v.get('chrom', '')}:{v.get('pos', '')}:{v.get('ref', '')}:::{v.get('alt', '')}",
+                "chrom": str(v.get('chrom', '')),
+                "pos": safe_int(v.get('pos', 0)),
+                "ref": str(v.get('ref', 'NA')),
+                "alt": str(v.get('alt', 'NA')),
+                "Gene": str(v.get('gene', 'UNKNOWN')),
+                "Gene.refGene": str(v.get('gene', 'UNKNOWN')),
+                "ExonicFunc": str(v.get('variant_effect', 'unknown')),
+                "ExonicFunc.refGene": str(v.get('variant_effect', 'unknown')),
+                "AAChange": str(v.get('AAChange', 'N/A')),
+                "AAChange.refGene": str(v.get('AAChange', 'N/A')),
+                "DP": safe_int(v.get('depth', 0)),
+                "VAF": safe_float(v.get('af', 0.0)),
+                "AF": safe_float(v.get('af', 0.0)),
+                "CLNSIG": str(v.get('CLNSIG', 'NA')),
+                "ClinVar": str(v.get('CLNSIG', 'NA')),
+                "ACMG": str(v.get('acmg', {}).get('classification', 'Unknown') if isinstance(v.get('acmg'), dict) else 'Unknown'),
+                "Actionability": str(v.get('actionability', {})),
+            })
+        
+        logger.info(f"Job {job_id}: Formatted {len(cleaned_variants)} variants for output")
         
         # Store results with CORRECT counts
         jobs_db[job_id] = {
@@ -607,7 +633,7 @@ async def run_analysis_task(
             "completed_at": datetime.now().isoformat()
         }
         
-        await manager.broadcast(f"Job {job_id}: ✅ Analysis complete!")
+        await manager.broadcast(f"Job {job_id}:  Analysis complete!")
         logger.info(f"Job {job_id}: Completed successfully")
         
     except Exception as e:
@@ -618,7 +644,7 @@ async def run_analysis_task(
             "traceback": traceback.format_exc(),
             "failed_at": datetime.now().isoformat()
         }
-        await manager.broadcast(f"Job {job_id}: ❌ Error - {str(e)}")
+        await manager.broadcast(f"Job {job_id}:  Error - {str(e)}")
     
     finally:
         # Clean up temp file
@@ -798,7 +824,7 @@ async def process_analysis_task(
             "error": str(e),
             "failed_at": datetime.now().isoformat()
         }
-        await manager.broadcast(f"Job {job_id}: ❌ Error - {str(e)}")
+        await manager.broadcast(f"Job {job_id}:  Error - {str(e)}")
     
     finally:
         # Cleanup temp file
@@ -846,12 +872,12 @@ async def list_jobs():
 # ═══════════════════════════════════════════════════════════════
 @app.on_event("startup")
 async def startup():
-    logger.info("🚀 Cancer Variant Analysis API starting...")
+    logger.info(" Cancer Variant Analysis API starting...")
     logger.info(f"CORS enabled for all origins")
 
 @app.on_event("shutdown")
 async def shutdown():
-    logger.info("🛑 API shutting down...")
+    logger.info(" API shutting down...")
     jobs_db.clear()
 
 # ═══════════════════════════════════════════════════════════════
