@@ -300,6 +300,8 @@ async def parse_vcf(file_path: str) -> pd.DataFrame:
     """Parse VCF/VCF.GZ file"""
     try:
         logger.info(f"Parsing VCF: {file_path}")
+        
+        # pysam handles both compressed and uncompressed VCF automatically
         vcf = pysam.VariantFile(file_path)
         records = []
         
@@ -309,7 +311,7 @@ async def parse_vcf(file_path: str) -> pd.DataFrame:
                 "POS": rec.pos,
                 "REF": rec.ref,
                 "ALT": ",".join(map(str, rec.alts or [])),
-                "QUAL": rec.qual,
+                "QUAL": rec.qual or ".",
                 "FILTER": ";".join(rec.filter.keys()) if rec.filter else "PASS"
             }
             # Add INFO fields
@@ -317,20 +319,57 @@ async def parse_vcf(file_path: str) -> pd.DataFrame:
                 record[k] = ",".join(map(str, v)) if isinstance(v, tuple) else v
             records.append(record)
         
+        if not records:
+            raise ValueError("VCF file is empty or contains no variants")
+        
         df = pd.DataFrame(records)
-        logger.info(f"Parsed {len(df)} variants from VCF")
+        logger.info(f"✓ Parsed {len(df)} variants from VCF")
         return df
         
     except Exception as e:
         logger.error(f"VCF parsing failed: {e}", exc_info=True)
-        raise HTTPException(400, f"VCF parsing failed: {str(e)}")
+        raise HTTPException(
+            400,
+            f"Failed to parse VCF file. Error: {str(e)}. "
+            f"Make sure file is valid VCF or VCF.GZ format."
+        )
+
+import gzip
 
 async def parse_table(file_path: str, ext: str) -> pd.DataFrame:
-    """Parse CSV/TSV/TXT file"""
+    """Parse CSV/TSV/TXT file with encoding detection and gzip support"""
     try:
         logger.info(f"Parsing table ({ext}): {file_path}")
+        
         sep = "," if ext == ".csv" else "\t"
-        df = pd.read_csv(file_path, sep=sep, dtype={"CHROM": str, "Chr": str}, low_memory=False)
+        
+        # Try different encodings
+        encodings = ["utf-8", "latin-1", "iso-8859-1", "windows-1252", "cp1252"]
+        df = None
+        
+        # Check if file is gzip compressed
+        try:
+            with gzip.open(file_path, 'rt', encoding='utf-8') as f:
+                df = pd.read_csv(f, sep=sep, dtype={"CHROM": str, "Chr": str}, low_memory=False)
+            logger.info(f"✓ File is gzip compressed, parsed successfully")
+        except (gzip.BadGzipFile, OSError, UnicodeDecodeError):
+            # Not gzip, try different encodings
+            for encoding in encodings:
+                try:
+                    df = pd.read_csv(
+                        file_path,
+                        sep=sep,
+                        dtype={"CHROM": str, "Chr": str},
+                        low_memory=False,
+                        encoding=encoding
+                    )
+                    logger.info(f"✓ File parsed with encoding: {encoding}")
+                    break
+                except (UnicodeDecodeError, LookupError):
+                    continue
+        
+        if df is None:
+            raise ValueError(f"Could not parse file with any encoding. Tried: {', '.join(encodings)}")
         
         # Normalize column names
         df = df.rename(columns={
@@ -344,13 +383,17 @@ async def parse_table(file_path: str, ext: str) -> pd.DataFrame:
         
     except Exception as e:
         logger.error(f"Table parsing failed: {e}", exc_info=True)
-        raise HTTPException(400, f"Table parsing failed: {str(e)}")
+        raise HTTPException(
+            400,
+            f"Failed to parse file. Error: {str(e)}. "
+            f"Make sure file is valid CSV/TSV/TXT (may be gzip compressed)."
+        )
 
 # ═══════════════════════════════════════════════════════════════
 # VARIANT ANALYSIS
 # ═══════════════════════════════════════════════════════════════
 def clean_variants_for_output(df: pd.DataFrame) -> List[Dict]:
-    """Convert dataframe to clean variant objects"""
+    """Convert dataframe to clean variant objects with correct field names"""
     cleaned = []
     
     # Find key columns
@@ -371,22 +414,33 @@ def clean_variants_for_output(df: pd.DataFrame) -> List[Dict]:
             if pd.isna(chr_val) or pd.isna(pos_val):
                 continue
             
+            # Find optional columns
             gene_col = find_column(df, ["gene.refgenewithver", "gene.refgene", "gene"], "UNKNOWN")
             effect_col = find_column(df, ["exonicfunc.refgenewithver", "exonicfunc.refgene"], "unknown")
             aachange_col = find_column(df, ["aachange.refgenewithver", "aachange.refgene"], "UNKNOWN:p.?")
             clnsig_col = find_column(df, ["clnsig"], "NA")
+            dp_col = find_column(df, ["dp"], None)
+            af_col = find_column(df, ["af", "vaf"], None)
             
+            # Build variant object with CORRECT field names for table display
             variant_obj = {
+                "Variant": f"{chr_val}:{pos_val}",
                 "chrom": str(chr_val),
                 "pos": safe_int(pos_val),
                 "ref": str(row.get(ref_col, "NA")),
                 "alt": str(row.get(alt_col, "NA")),
-                "DP": safe_int(row.get("DP"), 1),
-                "AF": safe_float(row.get("AF"), 0.01),
-                "gene": str(row.get(gene_col, "UNKNOWN")) if gene_col else "UNKNOWN",
-                "effect": str(row.get(effect_col, "unknown")) if effect_col else "unknown",
-                "aachange": str(row.get(aachange_col, "UNKNOWN:p.?")) if aachange_col else "UNKNOWN:p.?",
-                "clnsig": str(row.get(clnsig_col, "NA")) if clnsig_col else "NA",
+                "Gene": str(row.get(gene_col, "UNKNOWN")) if gene_col else "UNKNOWN",
+                "Gene.refGene": str(row.get(gene_col, "UNKNOWN")) if gene_col else "UNKNOWN",
+                "ExonicFunc": str(row.get(effect_col, "unknown")) if effect_col else "unknown",
+                "ExonicFunc.refGene": str(row.get(effect_col, "unknown")) if effect_col else "unknown",
+                "AAChange": str(row.get(aachange_col, "UNKNOWN:p.?")) if aachange_col else "UNKNOWN:p.?",
+                "AAChange.refGene": str(row.get(aachange_col, "UNKNOWN:p.?")) if aachange_col else "UNKNOWN:p.?",
+                "DP": safe_int(row.get(dp_col) if dp_col else row.get("DP"), 1),
+                "VAF": safe_float(row.get(af_col) if af_col else row.get("AF"), 0.0),
+                "AF": safe_float(row.get(af_col) if af_col else row.get("AF"), 0.0),
+                "CLNSIG": str(row.get(clnsig_col, "NA")) if clnsig_col else "NA",
+                "ClinVar": str(row.get(clnsig_col, "NA")) if clnsig_col else "NA",
+                "ACMG": "Unknown",
             }
             cleaned.append(variant_obj)
         except Exception as e:
