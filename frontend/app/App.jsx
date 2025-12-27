@@ -40,14 +40,18 @@ function getGene(v) {
 }
 
 function getAF(v) {
+  // Try multiple possible AF field names
   const af =
     v?.af ??
     v?.AF ??
+    v?.VAF ??
     v?.gnomAD_AF ??
     v?.gnomAD_exome_AF ??
     v?.gnomAD_genome_AF ??
+    v?.allele_freq ??
     0;
-  return Number(af) || 0;
+  const num = Number(af);
+  return isNaN(num) ? 0 : num;
 }
 
 /* =========================
@@ -61,7 +65,7 @@ function App() {
   const [workflowSteps, setWorkflowSteps] = useState([]);
 
   // Filters
-  const [afFilter, setAfFilter] = useState(0.01);
+  const [afFilter, setAfFilter] = useState(1.0); // Show all variants by default
   const [geneSearch, setGeneSearch] = useState("");
 
   const [userPrompt, setUserPrompt] = useState(
@@ -186,11 +190,17 @@ function App() {
           const data = jobData.results;
 
           setAnalysis(data?.summary || "");
-          setVariants(Array.isArray(data?.variants) ? data.variants : []);
+          const variants = Array.isArray(data?.variants) ? data.variants : [];
+          setVariants(variants);
+          
+          // Use actual variants array length if metadata not available
+          const inputCount = data?.variants_input || data?.input_variants || variants.length;
+          const filteredCount = data?.variants_filtered || data?.filtered_variants || variants.length;
+          
           setWorkflowSteps([
-            `✓ Input: ${data?.variants_input || 0} variants`,
-            `✓ Filtered: ${data?.variants_filtered || 0} variants`,
-            `✓ Analysis complete`,
+            `✓ Input: ${inputCount} variants`,
+            `✓ Filtered: ${filteredCount} variants`,
+            `✓ Analysis complete (${variants.length} cleaned records)`,
           ]);
 
           setHasResults(true);
@@ -516,13 +526,13 @@ function App() {
                 />
 
                 <label className="label-small" style={{ marginTop: 10 }}>
-                  AF Filter (≤ {afFilter.toFixed(3)})
+                  AF Filter (≤ {afFilter >= 1 ? "All" : afFilter.toFixed(3)})
                 </label>
                 <input
                   type="range"
                   min="0"
-                  max="0.1"
-                  step="0.001"
+                  max="1"
+                  step="0.01"
                   value={afFilter}
                   onChange={(e) => setAfFilter(Number(e.target.value))}
                 />
@@ -568,8 +578,8 @@ function App() {
               </div>
             )}
 
-            {hasResults && filteredVariants.length > 0 && (
-              <VariantVisuals variants={filteredVariants} />
+            {hasResults && variants.length > 0 && (
+              <VariantVisuals variants={variants} />
             )}
 
             {hasResults && (
@@ -581,16 +591,30 @@ function App() {
                     <pre className="report-text">{analysis}</pre>
                   </>
                 )}
-                {filteredVariants.length > 0 && (
+                {variants.length > 0 && (
                   <>
-                    <h4>Variants ({filteredVariants.length})</h4>
-                    <VariantTable variants={filteredVariants} geneQuery={geneSearch} />
+                    <h4>Variants ({variants.length})</h4>
+                    <div style={{ marginBottom: "10px", fontSize: "0.9em", color: "#666" }}>
+                      Showing {filteredVariants.length} of {variants.length} variants
+                      {geneSearch && ` (gene: ${geneSearch})`}
+                      {afFilter < 1 && ` (AF ≤ ${afFilter.toFixed(3)})`}
+                    </div>
+                    {filteredVariants.length > 0 ? (
+                      <VariantTable variants={filteredVariants} geneQuery={geneSearch} />
+                    ) : (
+                      <p className="no-variants">
+                        No variants match current filters. Try:
+                        <ul style={{ marginLeft: "20px" }}>
+                          <li>Increasing AF filter (drag slider right)</li>
+                          <li>Clearing gene search</li>
+                          <li>Resetting filters</li>
+                        </ul>
+                      </p>
+                    )}
                   </>
                 )}
-                {filteredVariants.length === 0 && variants.length > 0 && (
-                  <p className="no-variants">
-                    No variants match current filters. Adjust AF threshold or gene search.
-                  </p>
+                {variants.length === 0 && (
+                  <p className="no-variants">No variants to display</p>
                 )}
               </div>
             )}

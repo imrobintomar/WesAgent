@@ -516,14 +516,19 @@ async def run_analysis_task(
         await manager.broadcast(f"Job {job_id}: Formatting results...")
         cleaned_variants = clean_variants_for_output(filtered)
         
-        # Store results
+        # Store results with CORRECT counts
         jobs_db[job_id] = {
             "status": "completed",
-            "variants_input": original_count,
-            "variants_filtered": len(filtered),
+            "variants_input": original_count,  # Total input variants
+            "variants_filtered": len(filtered),  # After filtering
+            "variants_cleaned": len(cleaned_variants),  # Final output
             "results": {
                 "summary": analysis.get("summary", "Analysis complete"),
                 "variants": cleaned_variants,
+                "variants_input": original_count,  # Include in results too
+                "variants_filtered": len(filtered),
+                "input_variants": original_count,  # Alternative names
+                "filtered_variants": len(filtered),
                 "wilms": wilms_result,
             },
             "completed_at": datetime.now().isoformat()
@@ -566,113 +571,143 @@ async def analyze(
     max_lit_variants: str = Form("300"),
 ):
     """
-    Submit variant analysis job - RETURNS IMMEDIATELY (< 1 second)
+    Submit variant analysis job - RETURNS IN < 5 SECONDS
     
-    CRITICAL: This endpoint must return BEFORE any heavy processing
-    to avoid Cloudflare/proxy timeouts (524 errors).
-    
-    All processing is async in background.
+    CRITICAL: Read file QUICKLY in foreground, queue rest in background.
+    This avoids Cloudflare timeouts and ensures fast response with job_id.
     """
     job_id = str(uuid.uuid4())
     
-    # Validate inputs FIRST (quick checks only)
-    if not file.filename:
-        raise HTTPException(400, "No filename provided")
-    
-    ext = next(
-        (e for e in VALID_EXTENSIONS if file.filename.lower().endswith(e)),
-        None
-    )
-    if not ext:
-        raise HTTPException(
-            400,
-            f"Invalid file type. Supported: {', '.join(VALID_EXTENSIONS)}"
-        )
-    
     try:
-        max_lit_variants_int = int(max_lit_variants)
-        max_lit_variants_int = max(1, min(max_lit_variants_int, 10000))
-    except (ValueError, TypeError):
-        max_lit_variants_int = 300
-    
-    # Create job record (instant)
-    jobs_db[job_id] = {
-        "status": "queued",
-        "filename": file.filename,
-        "disease": disease,
-        "max_lit_variants": max_lit_variants_int,
-        "created_at": datetime.now().isoformat()
-    }
-    logger.info(f"Job {job_id}: Created for {file.filename}")
-    
-    # Queue background task (returns immediately)
-    background_tasks.add_task(
-        process_file_and_analyze,
-        job_id=job_id,
-        file=file,
-        ext=ext,
-        prompt=prompt,
-        disease=disease,
-        max_lit_variants_int=max_lit_variants_int,
-    )
-    
-    logger.info(f"Job {job_id}: Task queued - returning immediately")
-    
-    # RETURN BEFORE ANY FILE PROCESSING (< 100ms)
-    return JSONResponse(
-        status_code=202,
-        content={
-            "success": True,
-            "job_id": job_id,
+        # ═══════════════════════════════════════════════════════════
+        # VALIDATION (instant)
+        # ═══════════════════════════════════════════════════════════
+        if not file.filename:
+            raise HTTPException(400, "No filename provided")
+        
+        ext = next(
+            (e for e in VALID_EXTENSIONS if file.filename.lower().endswith(e)),
+            None
+        )
+        if not ext:
+            raise HTTPException(
+                400,
+                f"Invalid file type. Supported: {', '.join(VALID_EXTENSIONS)}"
+            )
+        
+        try:
+            max_lit_variants_int = int(max_lit_variants)
+            max_lit_variants_int = max(1, min(max_lit_variants_int, 10000))
+        except (ValueError, TypeError):
+            max_lit_variants_int = 300
+        
+        logger.info(f"Job {job_id}: Upload started - {file.filename}")
+        
+        # ═══════════════════════════════════════════════════════════
+        # READ FILE CONTENT (foreground, timeout 60s)
+        # ═══════════════════════════════════════════════════════════
+        try:
+            file_content = await asyncio.wait_for(file.read(), timeout=60.0)
+            if not file_content:
+                raise HTTPException(400, "File is empty")
+            logger.info(f"Job {job_id}: File read successfully ({len(file_content)} bytes)")
+        except asyncio.TimeoutError:
+            raise HTTPException(408, "File read timeout (>60s)")
+        except Exception as e:
+            logger.error(f"Job {job_id}: File read error: {e}")
+            raise HTTPException(400, f"Failed to read file: {str(e)}")
+        
+        # ═══════════════════════════════════════════════════════════
+        # CREATE JOB RECORD
+        # ═══════════════════════════════════════════════════════════
+        jobs_db[job_id] = {
             "status": "queued",
             "filename": file.filename,
-            "message": "Analysis queued successfully"
-        },
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "*",
-            "Access-Control-Allow-Headers": "*",
+            "disease": disease,
+            "max_lit_variants": max_lit_variants_int,
+            "file_size": len(file_content),
+            "created_at": datetime.now().isoformat()
         }
-    )
+        logger.info(f"Job {job_id}: Record created")
+        
+        # ═══════════════════════════════════════════════════════════
+        # QUEUE BACKGROUND TASK (returns immediately)
+        # ═══════════════════════════════════════════════════════════
+        background_tasks.add_task(
+            process_analysis_task,
+            job_id=job_id,
+            file_content=file_content,
+            ext=ext,
+            prompt=prompt,
+            disease=disease,
+            max_lit_variants_int=max_lit_variants_int,
+        )
+        
+        logger.info(f"Job {job_id}: Task queued - returning immediately")
+        
+        # ═══════════════════════════════════════════════════════════
+        # RETURN JOB_ID IMMEDIATELY
+        # ═══════════════════════════════════════════════════════════
+        return JSONResponse(
+            status_code=202,
+            content={
+                "success": True,
+                "job_id": job_id,
+                "status": "queued",
+                "filename": file.filename,
+                "file_size": len(file_content),
+                "message": "File received. Analysis queued."
+            },
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "*",
+                "Access-Control-Allow-Headers": "*",
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Job {job_id}: Unexpected error: {e}", exc_info=True)
+        if job_id in jobs_db:
+            jobs_db[job_id]["status"] = "error"
+            jobs_db[job_id]["error"] = str(e)
+        raise HTTPException(500, f"Server error: {str(e)}")
 
 
-# NEW: Process file and analysis in background (not blocking response)
-async def process_file_and_analyze(
+# NEW: Process analysis in background (after file is safely in memory)
+async def process_analysis_task(
     job_id: str,
-    file: UploadFile,
+    file_content: bytes,
     ext: str,
     prompt: str,
     disease: str,
     max_lit_variants_int: int,
 ):
-    """Background task - read file and run analysis"""
+    """
+    Background task - process file and run analysis
+    File content is already in memory, so no blocking I/O
+    """
+    tmp = None
     try:
         logger.info(f"Job {job_id}: Background processing started")
         await manager.broadcast(f"Job {job_id}: Starting analysis...")
         
-        # Read file in background
-        try:
-            content = await asyncio.wait_for(file.read(), timeout=60.0)
-            if not content:
-                raise ValueError("File is empty")
-            logger.info(f"Job {job_id}: File read ({len(content)} bytes)")
-        except asyncio.TimeoutError:
-            raise ValueError("File read timeout")
-        except Exception as e:
-            raise ValueError(f"File read failed: {str(e)}")
-        
-        # Write temp file
-        tmp = None
+        # ═══════════════════════════════════════════════════════════
+        # WRITE TO TEMP FILE
+        # ═══════════════════════════════════════════════════════════
         try:
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
-            tmp.write(content)
+            tmp.write(file_content)
             tmp.close()
-            logger.info(f"Job {job_id}: Temp file created")
+            logger.info(f"Job {job_id}: Temp file created at {tmp.name}")
         except Exception as e:
             logger.error(f"Job {job_id}: Temp file error: {e}")
             raise ValueError(f"Failed to create temp file: {str(e)}")
         
-        # Run analysis task
+        # ═══════════════════════════════════════════════════════════
+        # RUN ANALYSIS
+        # ═══════════════════════════════════════════════════════════
         await run_analysis_task(
             job_id=job_id,
             file_path=tmp.name,
@@ -691,6 +726,15 @@ async def process_file_and_analyze(
             "failed_at": datetime.now().isoformat()
         }
         await manager.broadcast(f"Job {job_id}: ❌ Error - {str(e)}")
+    
+    finally:
+        # Cleanup temp file
+        if tmp and os.path.exists(tmp.name):
+            try:
+                os.remove(tmp.name)
+                logger.debug(f"Job {job_id}: Cleaned up temp file")
+            except Exception as e:
+                logger.warning(f"Job {job_id}: Failed to clean temp file: {e}")
 
 @app.get("/results/{job_id}")
 async def get_results(job_id: str):
