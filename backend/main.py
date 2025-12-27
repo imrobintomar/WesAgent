@@ -29,6 +29,8 @@ from variant_agents import (
 )
 from panels.wilms_panel import load_wilms_panel
 from burden_engine import annotate_wilms_burden, wilms_gene_burden
+from fastapi import FastAPI
+
 
 # ═══════════════════════════════════════════════════════════════
 # CONFIGURATION

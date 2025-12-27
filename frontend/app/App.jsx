@@ -343,7 +343,7 @@ function App() {
     <div className="app">
       <header className="header">
         <h1>🧬 Whole Exome Analysis Agent</h1>
-        <p>Research-grade interpretation - Non-blocking async analysis</p>
+        <p>Research-grade interpretation </p>
       </header>
 
       <main className="main-content">
