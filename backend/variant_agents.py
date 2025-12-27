@@ -267,7 +267,7 @@ Provide a structured assessment of the variant's relevance to {disease}."""
 # -----------------------------
 # Variant Prioritization
 # -----------------------------
-def prioritize_variants(variants: List[Dict], max_variants: int = 300) -> List[Dict]:
+def prioritize_variants(variants: List[Dict], max_variants: int = 30) -> List[Dict]:
     """
     Intelligently prioritize variants for literature mining based on:
     1. ClinVar pathogenicity score
@@ -468,8 +468,8 @@ def analyze_variants(df: pd.DataFrame, user_prompt: str, disease: str = "Unknown
 
     for _, row in df.iterrows():
         results.append({
-            "gene": row.get(gene_col, "Unknown"),
-            "variant_effect": row.get(exonic_col, "Unknown"),
+            "gene": row.get(gene_col, "NA"),
+            "variant_effect": row.get(exonic_col, "NA"),
             "af": float(row.get("gnomad_af", 0)) if pd.notna(row.get("gnomad_af")) else 0,
             "depth": int(row.get("depth", 0)) if pd.notna(row.get("depth")) else 0,
             "quality": float(row.get("qual", 0)) if pd.notna(row.get("qual")) else 0,
@@ -481,7 +481,7 @@ def analyze_variants(df: pd.DataFrame, user_prompt: str, disease: str = "Unknown
             "ref": str(row.get("ref", "")),
             "alt": str(row.get("alt", "")),
             "acmg": acmg_classification(row),
-            "actionability": cancer_actionability(row.get(gene_col, "Unknown")),
+            "actionability": cancer_actionability(row.get(gene_col, "NA")),
         })
 
     logger.info(f"Created {len(results)} variant records for analysis")
